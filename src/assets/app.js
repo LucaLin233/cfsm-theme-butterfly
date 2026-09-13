@@ -899,10 +899,17 @@ function isRecord(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+// 计算"最佳延迟"时排除 BGP 线路：CFSM 的 `ping_bd` 实测 11/12 台为 1–2 ms，
+// 与福建到美日的真实 RTT 不符（电信/联通/移动为 21–354 ms），会污染卡片延迟胶囊、
+// 延迟分布直方图、区域均值、抽屉"平均延迟"与按延迟排序。
+// 线路延迟面板与详情抽屉仍照常显示 BGP（用户 2026-09-14 决定：BGP 保留展示，不参与取最小值）。
+const BEST_LATENCY_EXCLUDED_LINES = new Set(["bd"]);
+
 function bestLatency(status) {
   if (!isRecord(status?.ping)) return null;
   let best = null;
-  for (const entry of Object.values(status.ping)) {
+  for (const [id, entry] of Object.entries(status.ping)) {
+    if (BEST_LATENCY_EXCLUDED_LINES.has(id)) continue;
     if (!isRecord(entry)) continue;
     const value = finiteNumber(entry.latest, -1);
     if (value >= 0 && (best === null || value < best)) best = value;

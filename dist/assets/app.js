@@ -1,14 +1,14 @@
-import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.4.0";
-import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking } from "./cfsm-api.js?v=0.4.0";
-import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.4.0";
-import { mapHistoryRows, mapServers } from "./cfsm-map.js?v=0.4.0";
+import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.4.1";
+import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking } from "./cfsm-api.js?v=0.4.1";
+import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.4.1";
+import { mapHistoryRows, mapServers } from "./cfsm-map.js?v=0.4.1";
 
 const DEG_TO_RAD = Math.PI / 180;
 let worldLandVectorsPromise = null;
 
 function loadWorldLandVectors() {
   if (!worldLandVectorsPromise) {
-    worldLandVectorsPromise = import("./world-data.js?v=0.4.0")
+    worldLandVectorsPromise = import("./world-data.js?v=0.4.1")
       .then(({ WORLD_LAND_POINTS }) => Object.freeze(WORLD_LAND_POINTS.map(([longitude, latitude]) => {
         const lat = latitude * DEG_TO_RAD;
         const lng = longitude * DEG_TO_RAD;
@@ -23,7 +23,7 @@ function loadWorldLandVectors() {
   return worldLandVectorsPromise;
 }
 
-const THEME_VERSION = "0.4.0";
+const THEME_VERSION = "0.4.1";
 // 移植版仓库；上游原主题为 TomorrowX6/Komari-Butterfly（MIT，署名见 README）。
 const THEME_REPOSITORY = "https://github.com/LucaLin233/cfsm-theme-butterfly";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
@@ -899,10 +899,17 @@ function isRecord(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+// 计算"最佳延迟"时排除 BGP 线路：CFSM 的 `ping_bd` 实测 11/12 台为 1–2 ms，
+// 与福建到美日的真实 RTT 不符（电信/联通/移动为 21–354 ms），会污染卡片延迟胶囊、
+// 延迟分布直方图、区域均值、抽屉"平均延迟"与按延迟排序。
+// 线路延迟面板与详情抽屉仍照常显示 BGP（用户 2026-09-14 决定：BGP 保留展示，不参与取最小值）。
+const BEST_LATENCY_EXCLUDED_LINES = new Set(["bd"]);
+
 function bestLatency(status) {
   if (!isRecord(status?.ping)) return null;
   let best = null;
-  for (const entry of Object.values(status.ping)) {
+  for (const [id, entry] of Object.entries(status.ping)) {
+    if (BEST_LATENCY_EXCLUDED_LINES.has(id)) continue;
     if (!isRecord(entry)) continue;
     const value = finiteNumber(entry.latest, -1);
     if (value >= 0 && (best === null || value < best)) best = value;
