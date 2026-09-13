@@ -31,8 +31,9 @@ export const THEME_SETTINGS = Object.freeze([
     label: { "zh-CN": "圆角风格", en: "Corner style", ja: "角丸スタイル" } },
   { section: "appearance", key: "language", type: "select", options: ["auto", "zh-CN", "en", "ja"], default: "auto",
     label: { "zh-CN": "界面语言", en: "Interface language", ja: "表示言語" } },
-  // 原主题排版基准是 8–13px，桌面端偏小；默认放大一档（large = 1.12）
-  { section: "appearance", key: "font_scale", type: "select", options: ["small", "normal", "large", "xlarge", "xxlarge"], default: "xlarge",
+  // 原主题排版基准是 8–13px，桌面端偏小。档位值就是缩放系数本身：标准 = 1.25（用户实测基准），
+  // 其余档位以它为基准等比重排（较小 1.12 / 标准 1.25 / 较大 1.4 / 更大 1.55 / 极大 1.75）
+  { section: "appearance", key: "font_scale", type: "select", options: ["1.12", "1.25", "1.4", "1.55", "1.75"], default: "1.25",
     label: { "zh-CN": "字体大小", en: "Text size", ja: "文字サイズ" } },
   { section: "appearance", key: "background_image", type: "string", default: "",
     label: { "zh-CN": "自定义背景图 URL", en: "Custom background image URL", ja: "背景画像 URL" } },

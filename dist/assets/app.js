@@ -1,14 +1,14 @@
-import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.6.1";
-import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking } from "./cfsm-api.js?v=0.6.1";
-import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.6.1";
-import { mapHistoryRows, mapServers } from "./cfsm-map.js?v=0.6.1";
+import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.6.2";
+import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking } from "./cfsm-api.js?v=0.6.2";
+import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.6.2";
+import { mapHistoryRows, mapServers } from "./cfsm-map.js?v=0.6.2";
 
 const DEG_TO_RAD = Math.PI / 180;
 let worldLandVectorsPromise = null;
 
 function loadWorldLandVectors() {
   if (!worldLandVectorsPromise) {
-    worldLandVectorsPromise = import("./world-data.js?v=0.6.1")
+    worldLandVectorsPromise = import("./world-data.js?v=0.6.2")
       .then(({ WORLD_LAND_POINTS }) => Object.freeze(WORLD_LAND_POINTS.map(([longitude, latitude]) => {
         const lat = latitude * DEG_TO_RAD;
         const lng = longitude * DEG_TO_RAD;
@@ -23,7 +23,7 @@ function loadWorldLandVectors() {
   return worldLandVectorsPromise;
 }
 
-const THEME_VERSION = "0.6.1";
+const THEME_VERSION = "0.6.2";
 // 移植版仓库；上游原主题为 TomorrowX6/Komari-Butterfly（MIT，署名见 README）。
 const THEME_REPOSITORY = "https://github.com/LucaLin233/cfsm-theme-butterfly";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
@@ -33,8 +33,17 @@ const MOBILE_STATUS_RENDER_IDLE_MS = 180;
 const TRAFFIC_HISTORY_HOURS = 24;
 // 深链接路由：#/ 与 #/server/<id>（管理入口仍是站点自身的 /admin#admin）
 const HASH_SERVER_PREFIX = "#/server/";
-// 文字缩放档位（作用于 CSS 变量 --text-scale，见 styles.css 末尾）
-const TEXT_SCALE_FACTORS = Object.freeze({ small: 0.92, normal: 1, large: 1.12, xlarge: 1.25, xxlarge: 1.4 });
+// 文字缩放（作用于 CSS 变量 --text-scale，见 styles.css 末尾）。
+// 档位值即系数；标准 = 1.25 是用户实测确认的基准，其它档位以它为基准等比排布。
+const TEXT_SCALE_OPTIONS = Object.freeze(["1.12", "1.25", "1.4", "1.55", "1.75"]);
+const TEXT_SCALE_LABELS = Object.freeze({
+  "1.12": "textSmall",
+  "1.25": "textNormal",
+  "1.4": "textLarge",
+  "1.55": "textXLarge",
+  "1.75": "textXxLarge",
+});
+const TEXT_SCALE_FALLBACK = 1.25;
 
 // 默认值集中在 theme-config.js（与原 komari-theme.json 的 16 项设置逐项对应）。
 // 两处按移植决策改了默认值：default_sort 由 Komari 的 weight 改为 CFSM 的 sort_order，
@@ -2865,14 +2874,15 @@ function applyHashRoute() {
 
 // ---------- 主题设置面板（16 项，落库键前缀 butterfly_）----------
 
+function textScaleFactor(value) {
+  const factor = Number(value);
+  return Number.isFinite(factor) && factor >= 0.8 && factor <= 2 ? factor : TEXT_SCALE_FALLBACK;
+}
+
 function settingOptionLabel(option) {
   if (["system", "light", "dark"].includes(option)) return t(option);
   if (option === "auto") return t("languageAuto");
-  if (option === "small") return t("textSmall");
-  if (option === "normal") return t("textNormal");
-  if (option === "large") return t("textLarge");
-  if (option === "xlarge") return t("textXLarge");
-  if (option === "xxlarge") return t("textXxLarge");
+  if (TEXT_SCALE_LABELS[option]) return t(TEXT_SCALE_LABELS[option]);
   if (option === "zh-CN") return "简体中文";
   if (option === "ja") return "日本語";
   if (option === "en") return "English";
@@ -2881,7 +2891,7 @@ function settingOptionLabel(option) {
 
 // 文字缩放：写进 :root 的 CSS 变量，styles.css 里所有 font-size 都乘这个系数
 function applyTextScale() {
-  const factor = TEXT_SCALE_FACTORS[state.config.font_scale] ?? TEXT_SCALE_FACTORS.xlarge;
+  const factor = textScaleFactor(state.config.font_scale);
   document.documentElement.style.setProperty("--text-scale", String(factor));
 }
 
