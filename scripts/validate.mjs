@@ -36,6 +36,9 @@ const requiredDistFiles = [
   "assets/styles.css",
   "assets/region-data.js",
   "assets/world-data.js",
+  "assets/cfsm-api.js",
+  "assets/cfsm-map.js",
+  "assets/theme-config.js",
 ];
 for (const relative of requiredDistFiles) {
   try {
@@ -91,8 +94,23 @@ if (appSource.includes("__THEME_VERSION__")) errors.push("dist/assets/app.js sti
 if (!appSource.includes(`const THEME_VERSION = "${version}"`)) {
   errors.push("dist/assets/app.js version does not match package.json");
 }
-if (!appSource.includes('from "./region-data.js"')) errors.push("dist/assets/app.js must import the bundled region data");
-if (!appSource.includes('import("./world-data.js")')) errors.push("dist/assets/app.js must lazy-load the bundled world land data");
+// 主题模块必须带 ?v=<version> 引入：CFSM 对主题资源下发 immutable 缓存，
+// 不带版本串的 import 会在浏览器里长期命中旧副本。
+const versionedImports = [
+  ['from "./region-data.js?v=', "the bundled region data"],
+  ['from "./cfsm-api.js?v=', "the CFSM REST client"],
+  ['from "./cfsm-map.js?v=', "the CFSM mapping layer"],
+  ['from "./theme-config.js?v=', "the theme settings module"],
+  ['import("./world-data.js?v=', "the bundled world land data (lazy)"],
+];
+for (const [token, label] of versionedImports) {
+  if (!appSource.includes(`${token}${version}"`)) {
+    errors.push(`dist/assets/app.js must import ${label} with the ?v=${version} cache-busting query`);
+  }
+}
+if (appSource.includes("/api/rpc2") || appSource.includes("jsonrpc")) {
+  errors.push("dist/assets/app.js must not keep the Komari JSON-RPC client");
+}
 if (appSource.includes("renderPerformancePanel")) errors.push("Top Performance panel implementation must not be present");
 if (appSource.includes("highPerformance")) errors.push("Redundant performance summary must not be present");
 if (worldDataSource.includes("export const REGION_COORDS")) {

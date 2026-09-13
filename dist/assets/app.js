@@ -1,11 +1,14 @@
-import { REGION_COORDS, REGION_NAMES } from "./region-data.js";
+import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.2.0";
+import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking } from "./cfsm-api.js?v=0.2.0";
+import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, readThemeSettings } from "./theme-config.js?v=0.2.0";
+import { mapHistoryRows, mapServers } from "./cfsm-map.js?v=0.2.0";
 
 const DEG_TO_RAD = Math.PI / 180;
 let worldLandVectorsPromise = null;
 
 function loadWorldLandVectors() {
   if (!worldLandVectorsPromise) {
-    worldLandVectorsPromise = import("./world-data.js")
+    worldLandVectorsPromise = import("./world-data.js?v=0.2.0")
       .then(({ WORLD_LAND_POINTS }) => Object.freeze(WORLD_LAND_POINTS.map(([longitude, latitude]) => {
         const lat = latitude * DEG_TO_RAD;
         const lng = longitude * DEG_TO_RAD;
@@ -20,37 +23,25 @@ function loadWorldLandVectors() {
   return worldLandVectorsPromise;
 }
 
-const THEME_VERSION = "0.1.0";
-const THEME_REPOSITORY = "https://github.com/TomorrowX6/Komari-Butterfly";
-const RPC_ENDPOINT = "/api/rpc2";
+const THEME_VERSION = "0.2.0";
+// 移植版仓库；上游原主题为 TomorrowX6/Komari-Butterfly（MIT，署名见 README）。
+const THEME_REPOSITORY = "https://github.com/LucaLin233/cfsm-theme-butterfly";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
 const MOBILE_GLOBE_QUERY = "(max-width: 680px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
 const MOBILE_STATUS_RENDER_IDLE_MS = 180;
+// 流量视图与累计曲线取 24 小时；`/api/history/all` 只接受离散档位，由 cfsm-api 收敛。
+const TRAFFIC_HISTORY_HOURS = 24;
 
-const DEFAULT_CONFIG = Object.freeze({
-  color_scheme: "system",
-  accent_color: "indigo",
-  density: "comfortable",
-  corner_style: "soft",
-  background_image: "",
-  background_opacity: 16,
-  show_network_hero: true,
-  show_latency_panel: true,
-  show_ip_tags: false,
-  poll_interval: 5,
-  default_sort: "weight",
-  offline_position: "last",
-  brand_text: "",
-  hero_title: "Global Network",
-  hero_subtitle: "Real-time status at a glance",
-  custom_footer_html: "",
-});
+// 默认值集中在 theme-config.js（与原 komari-theme.json 的 16 项设置逐项对应）。
+// 两处按移植决策改了默认值：default_sort 由 Komari 的 weight 改为 CFSM 的 sort_order，
+// poll_interval 由 5 秒改为 30 秒（范围 15–300，页面不可见时暂停轮询）。
+const DEFAULT_CONFIG = Object.freeze({ ...DEFAULT_SETTINGS });
 
 const STORAGE = Object.freeze({
-  theme: "komari.butterfly.theme",
-  favorites: "komari.butterfly.favorites",
-  sidebar: "komari.butterfly.sidebar",
-  cardMode: "komari.butterfly.cardMode",
+  theme: "cfsm.butterfly.theme",
+  favorites: "cfsm.butterfly.favorites",
+  sidebar: "cfsm.butterfly.sidebar",
+  cardMode: "cfsm.butterfly.cardMode",
 });
 
 const STRINGS = {
@@ -182,8 +173,8 @@ const STRINGS = {
     disconnected: "连接中断",
     demoMode: "演示数据",
     retry: "重试",
-    loadFailedTitle: "无法读取 Komari 数据",
-    loadFailedCopy: "请确认此主题运行在 Komari 实例中，并且 /api/rpc2 可访问。",
+    loadFailedTitle: "无法读取站点数据",
+    loadFailedCopy: "请确认站点的 /api/config 与 /api/servers 可访问。",
     favoriteAdded: "已加入收藏",
     favoriteRemoved: "已移出收藏",
     appearanceChanged: "外观已切换",
@@ -337,8 +328,8 @@ const STRINGS = {
     disconnected: "Disconnected",
     demoMode: "Demo data",
     retry: "Retry",
-    loadFailedTitle: "Unable to load Komari data",
-    loadFailedCopy: "Make sure this theme is running inside a Komari instance and /api/rpc2 is reachable.",
+    loadFailedTitle: "Unable to load site data",
+    loadFailedCopy: "Make sure /api/config and /api/servers are reachable.",
     favoriteAdded: "Added to favorites",
     favoriteRemoved: "Removed from favorites",
     appearanceChanged: "Appearance changed",
@@ -492,8 +483,8 @@ const STRINGS = {
     disconnected: "未接続",
     demoMode: "デモデータ",
     retry: "再試行",
-    loadFailedTitle: "Komari データを読み込めません",
-    loadFailedCopy: "このテーマが Komari 上で動作し、/api/rpc2 にアクセスできることを確認してください。",
+    loadFailedTitle: "サイトデータを読み込めません",
+    loadFailedCopy: "/api/config と /api/servers にアクセスできるか確認してください。",
     favoriteAdded: "お気に入りに追加しました",
     favoriteRemoved: "お気に入りから削除しました",
     appearanceChanged: "外観を変更しました",
@@ -634,48 +625,25 @@ function networkArt() {
   </svg>`;
 }
 
-class RpcError extends Error {
-  constructor(code, message, data) {
-    super(`RPC Error ${code}: ${message}`);
-    this.name = "RpcError";
-    this.code = code;
-    this.data = data;
-  }
+// 数据层：CFSM 同源 REST（原主题的 Komari JSON-RPC 接口已整体替换）。
+// 分工：cfsm-api 负责请求/令牌/轮询，cfsm-map 负责三张字段映射表，theme-config 负责设置键与默认值。
+const api = createCfsmApi({ onUnauthorized: handleAuthInvalidated });
+
+// 令牌失效（401/403）：退回匿名并提示重新登录，不静默失败。
+function handleAuthInvalidated() {
+  state.userInfo = { logged_in: false, username: "" };
+  showToast(t("disconnected"), t("signIn"), "warning");
 }
 
-class RpcClient {
-  constructor(endpoint = RPC_ENDPOINT) {
-    this.endpoint = endpoint;
-    this.requestId = 0;
-  }
-
-  async call(method, params, timeout = 15000) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-    const payload = { jsonrpc: "2.0", method, id: ++this.requestId };
-    if (params !== undefined) payload.params = params;
-
-    try {
-      const response = await fetch(this.endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      const result = await response.json();
-      if (result && typeof result === "object" && result.error) {
-        throw new RpcError(result.error.code, result.error.message, result.error.data);
-      }
-      return result?.result;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-}
-
-const rpc = new RpcClient();
+const statusPoller = createPoller({
+  getIntervalSeconds: () => state.config.poll_interval,
+  onTick: async () => {
+    await refreshStatuses(false);
+    // refreshStatuses 内部已把失败写成 state.connected = false，这里抛出让 poller 退避。
+    if (!state.connected) throw new Error("status refresh failed");
+  },
+  onError: () => scheduleStatusRender(false),
+});
 const app = document.querySelector("#app");
 const globePortal = document.querySelector("#globe-portal");
 let regionGlobeController = null;
@@ -694,6 +662,11 @@ const state = {
   config: { ...DEFAULT_CONFIG },
   publicInfo: {},
   userInfo: null,
+  // CFSM 原始响应与站点配置（线路名、开关、theme_options 原件——保存设置时必须读-改-写）
+  cfsmConfig: null,
+  sysConfig: null,
+  themeOptions: {},
+  turnstileBlocked: false,
   version: { version: "unknown", hash: "unknown" },
   nodes: [],
   statuses: {},
@@ -873,45 +846,6 @@ function initials(value) {
 
 function isRecord(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function normalizeNodeEntries(raw) {
-  if (Array.isArray(raw)) {
-    return raw
-      .filter(node => isRecord(node) && typeof node.uuid === "string" && node.uuid.length > 0)
-      .map(node => [node.uuid, node]);
-  }
-  if (!isRecord(raw)) return [];
-  if (typeof raw.uuid === "string" && raw.uuid.length > 0) return [[raw.uuid, raw]];
-  return Object.entries(raw).filter(([, node]) => isRecord(node));
-}
-
-function normalizeStatuses(raw) {
-  if (!isRecord(raw)) return {};
-  return Object.fromEntries(Object.entries(raw).filter(([, status]) => isRecord(status)));
-}
-
-function normalizeRecentRecords(raw, uuid) {
-  const records = [];
-  const append = (entry, fallbackClient = uuid) => {
-    if (!isRecord(entry)) return;
-    const client = typeof entry.client === "string" && entry.client ? entry.client : fallbackClient;
-    if (client !== uuid) return;
-    const time = typeof entry.time === "string" ? new Date(entry.time) : null;
-    if (!time || !Number.isFinite(time.getTime())) return;
-    records.push({ ...entry, client, time: time.toISOString() });
-  };
-  if (Array.isArray(raw)) {
-    raw.forEach(entry => append(entry));
-  } else if (isRecord(raw)) {
-    for (const [key, value] of Object.entries(raw)) {
-      if (Array.isArray(value)) value.forEach(entry => append(entry, key));
-      else append(value, key);
-    }
-  }
-  const unique = new Map();
-  for (const record of records) unique.set(record.time, record);
-  return [...unique.values()].sort((a, b) => new Date(a.time) - new Date(b.time));
 }
 
 function bestLatency(status) {
@@ -1134,7 +1068,7 @@ function renderGlobePortal(regions = buildGlobeRegions()) {
       .then(vectors => {
         if (regionGlobeController === controller) controller.setLandVectors(vectors);
       })
-      .catch(error => console.error("[Komari Butterfly] Failed to load globe map data", error));
+      .catch(error => console.error("[CFSM Butterfly] Failed to load globe map data", error));
     if (state.globeSelectedRegion) {
       regionGlobeController.selectRegion(state.globeSelectedRegion);
       centerSelectedGlobeRegion(state.globeSelectedRegion, false);
@@ -1746,6 +1680,11 @@ function nodeStatus(uuid) {
   return state.statuses[uuid] || null;
 }
 
+// 线路名来源：优先 `/api/servers` 的 sysConfig.custom_*_name，回落到 `/api/config`。
+function lineSources() {
+  return [state.sysConfig, state.cfsmConfig];
+}
+
 function nodeIsOnline(uuid) {
   return nodeStatus(uuid)?.online === true;
 }
@@ -1762,7 +1701,7 @@ function mergeConfig(themeSettings) {
     accent_color: ["indigo", "blue", "teal", "violet", "rose"],
     density: ["comfortable", "compact"],
     corner_style: ["soft", "rounded"],
-    default_sort: ["weight", "name", "latency", "traffic"],
+    default_sort: ["sort_order", "name", "latency", "traffic"],
     offline_position: ["last", "first", "keep"],
   };
   for (const [key, options] of Object.entries(accepted)) {
@@ -1775,7 +1714,7 @@ function mergeConfig(themeSettings) {
     if (typeof source[key] === "boolean") config[key] = source[key];
   }
   config.background_opacity = clamp(source.background_opacity ?? config.background_opacity, 0, 100);
-  config.poll_interval = clamp(source.poll_interval ?? config.poll_interval, 3, 60);
+  config.poll_interval = clamp(source.poll_interval ?? config.poll_interval, POLL_INTERVAL_MIN, POLL_INTERVAL_MAX);
   return config;
 }
 
@@ -2180,7 +2119,7 @@ function renderToolbar(metrics) {
     <div class="toolbar-spacer"></div>
     <label class="toolbar-search">${icon("search", 14)}<span class="sr-only">${escapeHtml(searchLabel)}</span><input id="node-search" type="search" value="${escapeHtml(state.query)}" placeholder="${escapeHtml(searchLabel)}" autocomplete="off" autocapitalize="none" spellcheck="false" enterkeyhint="search"/></label>
     <select class="toolbar-select" id="node-sort" aria-label="${escapeHtml(t("sortBy"))}">
-      ${sortOption("weight", "sortWeight")}${sortOption("name", "sortName")}${sortOption("latency", "sortLatency")}${sortOption("traffic", "sortTraffic")}
+      ${sortOption("sort_order", "sortWeight")}${sortOption("name", "sortName")}${sortOption("latency", "sortLatency")}${sortOption("traffic", "sortTraffic")}
     </select>
     <button class="compact-button" type="button" data-action="refresh" aria-label="${escapeHtml(t("refresh"))}">${icon("refresh", 15)}</button>
     <div class="view-toggle"><button class="view-button${state.cardMode === "grid" ? " is-active" : ""}" type="button" data-card-mode="grid" aria-label="${escapeHtml(t("gridView"))}">${icon("grid", 15)}</button><button class="view-button${state.cardMode === "list" ? " is-active" : ""}" type="button" data-card-mode="list" aria-label="${escapeHtml(t("listView"))}">${icon("list", 15)}</button></div>
@@ -2227,6 +2166,7 @@ function filteredNodes() {
       const bStatus = nodeStatus(b.uuid) || {};
       return (finiteNumber(bStatus.net_in) + finiteNumber(bStatus.net_out)) - (finiteNumber(aStatus.net_in) + finiteNumber(aStatus.net_out));
     }
+    // 原主题按 weight 排序；CFSM 用 sort_order 填充 node.weight，保持同一路径
     return finiteNumber(b.weight) - finiteNumber(a.weight);
   });
 }
@@ -2650,8 +2590,13 @@ async function loadTrafficHistory(force = false) {
         while (cursor < state.nodes.length) {
           const node = state.nodes[cursor++];
           try {
-            const result = await rpc.call("common:getNodeRecentStatus", { uuid: node.uuid }, 18000);
-            history.set(node.uuid, normalizeRecentRecords(result?.records, node.uuid));
+            const rows = await api.getHistory(node.uuid, TRAFFIC_HISTORY_HOURS, { timeout: 20000 });
+            history.set(node.uuid, mapHistoryRows(rows, {
+              node,
+              status: state.statuses[node.uuid] || null,
+              sources: lineSources(),
+              now: Date.now(),
+            }));
           } catch {
             history.set(node.uuid, []);
           }
@@ -2683,10 +2628,18 @@ async function openDrawer(uuid) {
     return;
   }
   try {
-    const result = await rpc.call("common:getNodeRecentStatus", { uuid });
-    state.drawerRecords = normalizeRecentRecords(result?.records, uuid);
+    // 详情只取该机器 1 小时历史（单机约 30 KB）；失败时回落到流量视图的缓存。
+    // 三网窗口（ping/loss 数组）只存在于 `/api/servers`，此处不重复拉全量列表，
+    // 直接复用列表缓存里的 `node.cfsm.latencyWindow`。
+    const rows = await api.getHistory(uuid, 1, { timeout: 15000 });
+    state.drawerRecords = mapHistoryRows(rows, {
+      node: getNodeByUuid(uuid),
+      status: nodeStatus(uuid),
+      sources: lineSources(),
+      now: Date.now(),
+    });
   } catch {
-    state.drawerRecords = [];
+    state.drawerRecords = state.trafficHistory.get(uuid) || [];
   } finally {
     state.drawerLoading = false;
     if (state.drawerUuid === uuid) {
@@ -3067,35 +3020,44 @@ function handleDrawerPointerCancel(event) {
   finishDrawerDrag(event, true);
 }
 
-async function fetchPublicInfo() {
-  try {
-    return await rpc.call("public:getPublicSettings");
-  } catch (error) {
-    if (error instanceof RpcError && error.code === -32601) return rpc.call("common:getPublicInfo");
-    throw error;
-  }
-}
-
-async function loadLiveData() {
-  const publicInfo = await fetchPublicInfo();
-  state.publicInfo = isRecord(publicInfo) ? publicInfo : {};
+// `GET /api/config` → 站点信息 + 主题设置（theme_options 里的 butterfly_* 键）。
+async function loadSiteConfig() {
+  const config = await api.getConfig();
+  if (!isRecord(config)) throw new Error(t("loadFailedTitle"));
+  state.cfsmConfig = config;
+  state.themeOptions = isRecord(config.theme_options) ? config.theme_options : {};
+  state.turnstileBlocked = isTurnstileBlocking(config);
+  state.publicInfo = {
+    sitename: typeof config.site_title === "string" ? config.site_title : "",
+    description: "",
+    theme: typeof config.preferred_theme === "string" ? config.preferred_theme : "",
+    theme_settings: readThemeSettings(state.themeOptions),
+    is_public: config.is_public === true,
+  };
+  state.version = { version: typeof config.version === "string" ? config.version : "unknown", hash: "" };
   state.config = mergeConfig(state.publicInfo.theme_settings);
   state.sort = state.config.default_sort;
   applyAppearance();
+  return config;
+}
 
-  const [rawNodes, rawStatuses, userInfo, version] = await Promise.all([
-    rpc.call("common:getNodes"),
-    rpc.call("common:getNodesLatestStatus"),
-    rpc.call("common:getMe").catch(() => null),
-    rpc.call("common:getVersion").catch(() => ({ version: "unknown", hash: "unknown" })),
-  ]);
-  state.nodes = normalizeNodeEntries(rawNodes).map(([uuid, node]) => ({ ...node, uuid: typeof node.uuid === "string" && node.uuid ? node.uuid : uuid }));
-  state.statuses = normalizeStatuses(rawStatuses);
-  state.userInfo = isRecord(userInfo) ? userInfo : null;
-  state.version = isRecord(version) ? version : { version: "unknown", hash: "unknown" };
+// `/api/servers` 一次给出节点、实时状态与三网窗口（原主题是 getNodes + getNodesLatestStatus 两个调用）。
+function applyServersPayload(payload) {
+  const mapped = mapServers(payload, { config: state.cfsmConfig, now: Date.now() });
+  state.sysConfig = mapped.sysConfig;
+  state.nodes = mapped.nodes;
+  state.statuses = mapped.statuses;
   state.connected = true;
   state.lastUpdated = Date.now();
   updateSamples();
+  return mapped;
+}
+
+async function loadLiveData() {
+  await loadSiteConfig();
+  applyServersPayload(await api.getServers({ timeout: 20000 }));
+  // CFSM 没有 `/api/me`：本地有 jwt_token 即视为已登录（可看隐藏机器、可查 >24h 历史）。
+  state.userInfo = { logged_in: hasStoredToken(), username: "" };
 }
 
 async function refreshStatuses(manual = false) {
@@ -3112,11 +3074,7 @@ async function refreshStatuses(manual = false) {
       return;
     }
     try {
-      const raw = await rpc.call("common:getNodesLatestStatus", undefined, 12000);
-      state.statuses = normalizeStatuses(raw);
-      state.connected = true;
-      state.lastUpdated = Date.now();
-      updateSamples();
+      applyServersPayload(await api.getServers({ timeout: 15000 }));
       scheduleStatusRender(manual);
       if (manual) showToast(t("realtimeMonitoring"), t("updatedNow"), "success");
     } catch (error) {
@@ -3129,15 +3087,16 @@ async function refreshStatuses(manual = false) {
   }
 }
 
+// 轮询由 cfsm-api 的 poller 负责：页面不可见暂停，恢复可见先立即拉一次，失败按 2 的幂退避。
 function startTimers() {
   stopTimers();
   if (document.hidden) return;
-  state.pollTimer = setInterval(() => refreshStatuses(false), state.config.poll_interval * 1000);
+  statusPoller.start();
   state.clockTimer = setInterval(updateLiveElements, 1000);
 }
 
 function stopTimers() {
-  clearInterval(state.pollTimer);
+  statusPoller.stop();
   clearInterval(state.clockTimer);
   state.pollTimer = null;
   state.clockTimer = null;
@@ -3154,7 +3113,7 @@ function handleVisibilityChange() {
   }
   if (state.loading || state.error) return;
   updateLiveElements();
-  void refreshStatuses(false);
+  // poller 在可见性恢复时会立即执行一次；这里重新起表并由它接管排程。
   startTimers();
 }
 
@@ -3172,7 +3131,7 @@ async function initialize() {
     if (new URLSearchParams(location.search).get("globe") === "1") openGlobe();
     startTimers();
   } catch (error) {
-    console.error("[Komari Butterfly] initialization failed", error);
+    console.error("[CFSM Butterfly] initialization failed", error);
     state.loading = false;
     state.error = error instanceof Error ? error.message : String(error);
     renderFatalError();
@@ -3197,10 +3156,10 @@ function loadDemoData() {
     theme: "Butterfly",
     theme_settings: {},
   };
-  state.config = { ...DEFAULT_CONFIG, color_scheme: "light", default_sort: "weight" };
+  state.config = { ...DEFAULT_CONFIG, color_scheme: "light", default_sort: "sort_order" };
   state.sort = state.config.default_sort;
   state.userInfo = { logged_in: false, username: "", uuid: "", "2fa_enabled": false, sso_id: "", sso_type: "" };
-  state.version = { version: "1.4.3", hash: "demo" };
+  state.version = { version: "demo", hash: "demo" };
   state.nodes = demoNodes();
   state.statuses = demoStatuses();
   state.connected = true;
