@@ -34,7 +34,7 @@ const TRAFFIC_HISTORY_HOURS = 24;
 // 深链接路由：#/ 与 #/server/<id>（管理入口仍是站点自身的 /admin#admin）
 const HASH_SERVER_PREFIX = "#/server/";
 // 文字缩放档位（作用于 CSS 变量 --text-scale，见 styles.css 末尾）
-const TEXT_SCALE_FACTORS = Object.freeze({ small: 0.92, normal: 1, large: 1.12, xlarge: 1.25 });
+const TEXT_SCALE_FACTORS = Object.freeze({ small: 0.92, normal: 1, large: 1.12, xlarge: 1.25, xxlarge: 1.4 });
 
 // 默认值集中在 theme-config.js（与原 komari-theme.json 的 16 项设置逐项对应）。
 // 两处按移植决策改了默认值：default_sort 由 Komari 的 weight 改为 CFSM 的 sort_order，
@@ -111,6 +111,7 @@ const STRINGS = {
     textNormal: "标准",
     textLarge: "较大",
     textXLarge: "更大",
+    textXxLarge: "极大",
     remainingTraffic: "剩余流量",
     usedThisMonth: "当月已用",
     billing: "计费与流量",
@@ -300,6 +301,7 @@ const STRINGS = {
     textNormal: "Standard",
     textLarge: "Larger",
     textXLarge: "Largest",
+    textXxLarge: "Extra large",
     remainingTraffic: "Remaining",
     usedThisMonth: "Used this month",
     billing: "Billing & traffic",
@@ -489,6 +491,7 @@ const STRINGS = {
     textNormal: "標準",
     textLarge: "大きめ",
     textXLarge: "最大",
+    textXxLarge: "特大",
     remainingTraffic: "残り通信量",
     usedThisMonth: "今月の使用量",
     billing: "課金と通信量",
@@ -2869,6 +2872,7 @@ function settingOptionLabel(option) {
   if (option === "normal") return t("textNormal");
   if (option === "large") return t("textLarge");
   if (option === "xlarge") return t("textXLarge");
+  if (option === "xxlarge") return t("textXxLarge");
   if (option === "zh-CN") return "简体中文";
   if (option === "ja") return "日本語";
   if (option === "en") return "English";
@@ -2877,7 +2881,7 @@ function settingOptionLabel(option) {
 
 // 文字缩放：写进 :root 的 CSS 变量，styles.css 里所有 font-size 都乘这个系数
 function applyTextScale() {
-  const factor = TEXT_SCALE_FACTORS[state.config.font_scale] ?? TEXT_SCALE_FACTORS.large;
+  const factor = TEXT_SCALE_FACTORS[state.config.font_scale] ?? TEXT_SCALE_FACTORS.xlarge;
   document.documentElement.style.setProperty("--text-scale", String(factor));
 }
 
