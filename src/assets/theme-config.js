@@ -37,7 +37,7 @@ export const THEME_SETTINGS = Object.freeze([
     label: { "zh-CN": "显示全局网络头图", en: "Show global network hero", ja: "グローバルネットワーク表示" } },
   { section: "dashboard", key: "show_latency_panel", type: "switch", default: true,
     label: { "zh-CN": "显示延迟分布", en: "Show latency distribution", ja: "遅延分布を表示" } },
-  { section: "dashboard", key: "show_ip_tags", type: "switch", default: false,
+  { section: "dashboard", key: "show_ip_tags", type: "switch", default: true,
     label: { "zh-CN": "显示协议徽标（V4/V6）", en: "Show protocol badges (V4/V6)", ja: "プロトコルバッジ（V4/V6）" } },
   { section: "dashboard", key: "poll_interval", type: "number", min: POLL_INTERVAL_MIN, max: POLL_INTERVAL_MAX, default: 30,
     label: { "zh-CN": "状态刷新间隔（秒）", en: "Status refresh interval (seconds)", ja: "状態更新間隔（秒）" } },
