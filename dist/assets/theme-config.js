@@ -31,6 +31,9 @@ export const THEME_SETTINGS = Object.freeze([
     label: { "zh-CN": "圆角风格", en: "Corner style", ja: "角丸スタイル" } },
   { section: "appearance", key: "language", type: "select", options: ["auto", "zh-CN", "en", "ja"], default: "auto",
     label: { "zh-CN": "界面语言", en: "Interface language", ja: "表示言語" } },
+  // 原主题排版基准是 8–13px，桌面端偏小；默认放大一档（large = 1.12）
+  { section: "appearance", key: "font_scale", type: "select", options: ["small", "normal", "large", "xlarge"], default: "large",
+    label: { "zh-CN": "字体大小", en: "Text size", ja: "文字サイズ" } },
   { section: "appearance", key: "background_image", type: "string", default: "",
     label: { "zh-CN": "自定义背景图 URL", en: "Custom background image URL", ja: "背景画像 URL" } },
   { section: "appearance", key: "background_opacity", type: "number", min: 0, max: 100, default: 16,
