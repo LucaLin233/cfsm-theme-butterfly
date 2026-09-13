@@ -1,5 +1,6 @@
 import { access, readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
 const distDir = resolve(root, "dist");
@@ -108,6 +109,9 @@ for (const [token, label] of versionedImports) {
     errors.push(`dist/assets/app.js must import ${label} with the ?v=${version} cache-busting query`);
   }
 }
+if (!appSource.includes("/api/theme_options")) {
+  errors.push("dist/assets/app.js must wire the theme settings save endpoint");
+}
 if (appSource.includes("/api/rpc2") || appSource.includes("jsonrpc")) {
   errors.push("dist/assets/app.js must not keep the Komari JSON-RPC client");
 }
@@ -158,6 +162,28 @@ const requiredMobileCssTokens = [
 ];
 for (const token of requiredMobileCssTokens) {
   if (!cssSource.includes(token)) errors.push(`dist/assets/styles.css is missing mobile contract token: ${token}`);
+}
+
+// 模块必须真的能被解析并导出 app.js 需要的名字。
+// （`node --check` 对 ESM 不可靠：这个断言就是为了兜住"方法被插到类外"这类语法/导出问题。）
+const importPattern = /import\s*\{([^}]+)\}\s*from\s*"\.\/([A-Za-z0-9_-]+)\.js\?v=/g;
+const expectedExports = new Map();
+for (const match of appSource.matchAll(importPattern)) {
+  const names = match[1].split(",").map(name => name.trim()).filter(Boolean);
+  const moduleName = match[2];
+  expectedExports.set(moduleName, [...(expectedExports.get(moduleName) || []), ...names]);
+}
+if (expectedExports.size === 0) errors.push("dist/assets/app.js imports no theme modules with a version query");
+for (const [moduleName, names] of expectedExports) {
+  const modulePath = resolve(distDir, "assets", `${moduleName}.js`);
+  try {
+    const module = await import(pathToFileURL(modulePath).href);
+    for (const name of names) {
+      if (!(name in module)) errors.push(`dist/assets/${moduleName}.js does not export ${name}`);
+    }
+  } catch (error) {
+    errors.push(`dist/assets/${moduleName}.js failed to load: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 if (errors.length > 0) {

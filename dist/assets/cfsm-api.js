@@ -12,6 +12,9 @@ export const API_PATHS = Object.freeze({
   servers: "/api/servers",
   server: "/api/server",
   history: "/api/history/all",
+  // 写接口：CFSM 官方 theme-develop.md 规定 body 为 { theme_options: {...} }，
+  // 无论站点是否公开都必须带 JWT；该接口只更新 appearance_options.theme_options（整对象替换）。
+  themeOptions: "/api/theme_options",
 });
 
 // `/api/history/all` 的 hours 只接受这组离散值（实测）。
@@ -106,7 +109,15 @@ export class CfsmApi {
       throw new CfsmApiError("登录状态已失效", { status: response.status, path });
     }
     if (!response.ok) {
-      throw new CfsmApiError(`HTTP ${response.status}`, { status: response.status, path });
+      // CFSM 的错误体是 { error: "invalidThemeOptionsFormat" } 这类代码，优先透出它
+      let code = "";
+      try {
+        const payload = await response.json();
+        if (payload && typeof payload.error === "string") code = payload.error;
+      } catch {
+        // 非 JSON 错误体：保持 HTTP 状态描述
+      }
+      throw new CfsmApiError(code || `HTTP ${response.status}`, { status: response.status, path });
     }
     try {
       return await response.json();
@@ -134,6 +145,21 @@ export class CfsmApi {
   // `GET /api/history/all?id=&hours=` → 裸数组；hours 只接受离散值，这里自动取最近档。
   getHistory(id, hours = 24, options = {}) {
     return this.request(API_PATHS.history, { ...options, query: { id, hours: nearestHistoryHours(hours), ...(options.query || {}) } });
+  }
+
+  // `POST /api/theme_options`：整对象替换 theme_options → 调用方必须先读-改-写。
+  saveThemeOptions(themeOptions, { turnstileVerified = "" } = {}) {
+    const headers = {};
+    if (turnstileVerified) headers["X-Turnstile-Verified"] = turnstileVerified;
+    // 注意 `request()` 的签名：额外请求参数要放在 `init` 里（顶层只认 query/timeout）
+    return this.request(API_PATHS.themeOptions, {
+      timeout: 20000,
+      init: {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ theme_options: themeOptions }),
+      },
+    });
   }
 }
 

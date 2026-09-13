@@ -1,14 +1,14 @@
-import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.3.0";
-import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking } from "./cfsm-api.js?v=0.3.0";
-import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, readThemeSettings } from "./theme-config.js?v=0.3.0";
-import { mapHistoryRows, mapServers } from "./cfsm-map.js?v=0.3.0";
+import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.4.0";
+import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking } from "./cfsm-api.js?v=0.4.0";
+import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.4.0";
+import { mapHistoryRows, mapServers } from "./cfsm-map.js?v=0.4.0";
 
 const DEG_TO_RAD = Math.PI / 180;
 let worldLandVectorsPromise = null;
 
 function loadWorldLandVectors() {
   if (!worldLandVectorsPromise) {
-    worldLandVectorsPromise = import("./world-data.js?v=0.3.0")
+    worldLandVectorsPromise = import("./world-data.js?v=0.4.0")
       .then(({ WORLD_LAND_POINTS }) => Object.freeze(WORLD_LAND_POINTS.map(([longitude, latitude]) => {
         const lat = latitude * DEG_TO_RAD;
         const lng = longitude * DEG_TO_RAD;
@@ -23,7 +23,7 @@ function loadWorldLandVectors() {
   return worldLandVectorsPromise;
 }
 
-const THEME_VERSION = "0.3.0";
+const THEME_VERSION = "0.4.0";
 // 移植版仓库；上游原主题为 TomorrowX6/Komari-Butterfly（MIT，署名见 README）。
 const THEME_REPOSITORY = "https://github.com/LucaLin233/cfsm-theme-butterfly";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
@@ -31,6 +31,8 @@ const MOBILE_GLOBE_QUERY = "(max-width: 680px), (max-width: 900px) and (orientat
 const MOBILE_STATUS_RENDER_IDLE_MS = 180;
 // 流量视图与累计曲线取 24 小时；`/api/history/all` 只接受离散档位，由 cfsm-api 收敛。
 const TRAFFIC_HISTORY_HOURS = 24;
+// 深链接路由：#/ 与 #/server/<id>（管理入口仍是站点自身的 /admin#admin）
+const HASH_SERVER_PREFIX = "#/server/";
 
 // 默认值集中在 theme-config.js（与原 komari-theme.json 的 16 项设置逐项对应）。
 // 两处按移植决策改了默认值：default_sort 由 Komari 的 weight 改为 CFSM 的 sort_order，
@@ -91,6 +93,17 @@ const STRINGS = {
     lossRate: "丢包",
     nodeNotFound: "未找到该机器",
     nodeNotFoundCopy: "该机器可能已被删除、设为隐藏，或链接有误。",
+    themeSettings: "主题设置",
+    settingsDraftHint: "改动先在本地预览，点「保存设置」后写入站点。",
+    settingsSignInHint: "未登录，只能查看。请先到 /admin#admin 登录后再保存。",
+    settingsTurnstileHint: "站点已开启 Turnstile，本移植版暂不支持保存设置，仅可查看。",
+    settingsSave: "保存设置",
+    settingsSaving: "保存中…",
+    settingsSaved: "设置已保存",
+    settingsSavedCopy: "已写入站点 theme_options，其它主题的设置保持不变。",
+    settingsSaveFailed: "保存失败",
+    settingsReadFailed: "读取现有设置失败，已取消写入。",
+    settingsReset: "恢复默认",
     excellent: "优秀",
     good: "良好",
     fair: "一般",
@@ -250,6 +263,17 @@ const STRINGS = {
     lossRate: "Loss",
     nodeNotFound: "Server not found",
     nodeNotFoundCopy: "It may have been deleted, hidden, or the link is wrong.",
+    themeSettings: "Theme settings",
+    settingsDraftHint: "Changes preview locally; click “Save settings” to write them to the site.",
+    settingsSignInHint: "Read-only: you are not signed in. Sign in at /admin#admin to save.",
+    settingsTurnstileHint: "Turnstile is enabled on this site, so this port cannot save settings yet.",
+    settingsSave: "Save settings",
+    settingsSaving: "Saving…",
+    settingsSaved: "Settings saved",
+    settingsSavedCopy: "Written to the site theme_options; other themes' settings are untouched.",
+    settingsSaveFailed: "Save failed",
+    settingsReadFailed: "Could not read the current settings, so nothing was written.",
+    settingsReset: "Reset to defaults",
     excellent: "Excellent",
     good: "Good",
     fair: "Fair",
@@ -409,6 +433,17 @@ const STRINGS = {
     lossRate: "ロス",
     nodeNotFound: "サーバーが見つかりません",
     nodeNotFoundCopy: "削除されたか、非表示に設定されている可能性があります。",
+    themeSettings: "テーマ設定",
+    settingsDraftHint: "変更はこの画面でのみ反映されます。「設定を保存」でサイトに書き込みます。",
+    settingsSignInHint: "未ログインのため閲覧のみです。保存するには /admin#admin でログインしてください。",
+    settingsTurnstileHint: "サイトで Turnstile が有効なため、この移植版では設定を保存できません。",
+    settingsSave: "設定を保存",
+    settingsSaving: "保存中…",
+    settingsSaved: "設定を保存しました",
+    settingsSavedCopy: "サイトの theme_options に書き込みました。他のテーマの設定は変更していません。",
+    settingsSaveFailed: "保存に失敗しました",
+    settingsReadFailed: "現在の設定を読み取れなかったため、書き込みを中止しました。",
+    settingsReset: "既定値に戻す",
     excellent: "非常に良い",
     good: "良好",
     fair: "普通",
@@ -560,6 +595,7 @@ const ICON_PATHS = {
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   network: '<circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="m7 11 10-5M7 13l10 5"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 4.6a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 11a2 2 0 1 1 0 4z"/>',
 };
 
 function icon(name, size = 20, extra = "") {
@@ -707,6 +743,9 @@ const state = {
   globeSelectedRegion: null,
   mobileSearchOpen: false,
   notificationsOpen: false,
+  settingsOpen: false,
+  settingsDraft: null,
+  settingsSaving: false,
   pollTimer: null,
   clockTimer: null,
   demoMode: shouldUseDemo(),
@@ -1995,7 +2034,7 @@ function renderApp() {
         </nav>
       </div>
       <div class="sidebar-bottom">
-        <a class="sidebar-user" href="/admin">
+        <a class="sidebar-user" href="/admin#admin">
           <div class="user-avatar">${escapeHtml(initials(userName))}</div>
           <div class="sidebar-user-copy"><div class="sidebar-user-name">${escapeHtml(userName)}</div><div class="sidebar-user-state">${escapeHtml(state.userInfo?.logged_in ? t("admin") : t("poweredBy"))}</div></div>
           <span class="sidebar-user-chevron">${icon("chevronRight", 15)}</span>
@@ -2013,11 +2052,12 @@ function renderApp() {
         <label class="top-search desktop-top-search">${icon("search")}<span class="sr-only">${escapeHtml(t("searchPlaceholder"))}</span><input id="global-search" type="search" value="${escapeHtml(state.query)}" placeholder="${escapeHtml(t("searchPlaceholder"))}" autocomplete="off" autocapitalize="none" spellcheck="false" enterkeyhint="search"/><span class="search-shortcut">Ctrl K</span></label>
         <div class="top-actions">
           ${state.demoMode ? `<span class="demo-badge">${escapeHtml(t("demoMode"))}</span>` : ""}
+          <button class="icon-button" type="button" data-action="open-settings" aria-expanded="${state.settingsOpen}" aria-label="${escapeHtml(t("themeSettings"))}" title="${escapeHtml(t("themeSettings"))}">${icon("settings")}</button>
           <button class="icon-button" type="button" data-action="refresh" aria-label="${escapeHtml(t("refresh"))}">${icon("refresh")}</button>
           <button class="icon-button mobile-search-button" type="button" data-action="toggle-mobile-search" aria-expanded="${state.mobileSearchOpen}" aria-label="${escapeHtml(t("mobileSearch"))}">${icon("search")}</button>
           <button class="icon-button" type="button" data-action="toggle-theme" aria-label="${escapeHtml(t("themeToggle"))}"></button>
           <button class="icon-button notification-button${alertCount ? " has-dot" : ""}${state.notificationsOpen ? " is-active" : ""}" type="button" data-action="toggle-notifications" aria-expanded="${state.notificationsOpen}" aria-controls="notification-popover" aria-label="${escapeHtml(t("recentAlerts"))}">${icon("bell")}</button>
-          <a class="action-button" href="/admin">${icon("user", 16)}<span>${escapeHtml(state.userInfo?.logged_in ? t("admin") : t("signIn"))}</span></a>
+          <a class="action-button" href="/admin#admin">${icon("user", 16)}<span>${escapeHtml(state.userInfo?.logged_in ? t("admin") : t("signIn"))}</span></a>
         </div>
         ${state.notificationsOpen ? renderNotificationPopover(alerts) : ""}
         <div class="mobile-search-row">
@@ -2034,6 +2074,7 @@ function renderApp() {
     <div class="toast-stack" aria-live="polite"></div>
     <div class="drawer-backdrop${state.drawerUuid ? " is-open" : ""}" data-action="close-drawer"></div>
     <aside class="node-drawer${state.drawerUuid ? " is-open" : ""}" aria-label="${escapeHtml(t("nodeDetails"))}">${state.drawerUuid ? renderDrawer() : ""}</aside>
+    ${renderSettingsPanel()}
   </div>`;
   updateThemeButtons();
   refreshOpenGlobe();
@@ -2333,7 +2374,7 @@ function renderAlertsPanel() {
 
 function renderFooter() {
   if (state.config.custom_footer_html.trim()) return `<footer class="app-footer"><div class="custom-footer">${state.config.custom_footer_html}</div></footer>`;
-  return `<footer class="app-footer"><span>${escapeHtml(t("footer", { theme: THEME_VERSION, komari: state.version.version || "unknown" }))}</span><span class="footer-links"><a href="${THEME_REPOSITORY}" target="_blank" rel="noreferrer">GitHub</a><a href="/admin">${escapeHtml(t("admin"))}</a></span></footer>`;
+  return `<footer class="app-footer"><span>${escapeHtml(t("footer", { theme: THEME_VERSION, komari: state.version.version || "unknown" }))}</span><span class="footer-links"><a href="${THEME_REPOSITORY}" target="_blank" rel="noreferrer">GitHub</a><a href="/admin#admin">${escapeHtml(t("admin"))}</a></span></footer>`;
 }
 
 function groupByRegion() {
@@ -2664,6 +2705,147 @@ function saveFavorites() {
   safeStorageSet(STORAGE.favorites, JSON.stringify([...state.favorites]));
 }
 
+// ---------- 深链接路由（#/ 与 #/server/<id>）----------
+
+function readHashRoute() {
+  const hash = String(location.hash || "");
+  if (!hash || hash === "#" || hash === "#/") return { view: "root", id: null };
+  if (hash.startsWith(HASH_SERVER_PREFIX)) {
+    let id = "";
+    try {
+      id = decodeURIComponent(hash.slice(HASH_SERVER_PREFIX.length)).trim();
+    } catch {
+      id = "";
+    }
+    return id ? { view: "server", id } : { view: "root", id: null };
+  }
+  // 其它 hash（例如站点自身管理页的 #admin）不接管
+  return { view: "other", id: null };
+}
+
+function writeHash(hash) {
+  if (String(location.hash || "") === hash) return;
+  location.hash = hash;
+}
+
+// 幂等：只看当前 state 与 hash 是否一致，因此 click → 写 hash → hashchange 不会递归
+function applyHashRoute() {
+  const route = readHashRoute();
+  if (route.view === "server") {
+    if (state.drawerUuid !== route.id) void openDrawer(route.id);
+    return;
+  }
+  if (route.view === "root" && state.drawerUuid) closeDrawer({ syncHash: false });
+}
+
+// ---------- 主题设置面板（16 项，落库键前缀 butterfly_）----------
+
+function settingOptionLabel(option) {
+  return ["system", "light", "dark"].includes(option) ? t(option) : option;
+}
+
+function updateSettingDraft(key, rawValue) {
+  if (!state.settingsDraft) state.settingsDraft = { ...state.config };
+  const meta = settingsMeta(key);
+  if (!meta) return;
+  state.settingsDraft[key] = normalizeSettingValue(meta, rawValue);
+}
+
+function renderSettingControl(meta, draft) {
+  const value = draft[meta.key];
+  const id = `setting-${meta.key}`;
+  const label = escapeHtml(settingLabel(meta, state.language));
+  const common = `id="${id}" data-setting="${meta.key}"`;
+  if (meta.type === "switch") {
+    return `<div class="settings-row"><label class="settings-label" for="${id}">${label}</label><input ${common} type="checkbox"${value ? " checked" : ""}/></div>`;
+  }
+  if (meta.type === "select") {
+    const options = (meta.options || [])
+      .map(option => `<option value="${escapeHtml(option)}"${option === value ? " selected" : ""}>${escapeHtml(settingOptionLabel(option))}</option>`)
+      .join("");
+    return `<div class="settings-row"><label class="settings-label" for="${id}">${label}</label><select ${common}>${options}</select></div>`;
+  }
+  if (meta.type === "number") {
+    const min = meta.min !== undefined ? ` min="${meta.min}"` : "";
+    const max = meta.max !== undefined ? ` max="${meta.max}"` : "";
+    return `<div class="settings-row"><label class="settings-label" for="${id}">${label}</label><input ${common} type="number"${min}${max} value="${escapeHtml(String(value))}"/></div>`;
+  }
+  if (meta.type === "textbox") {
+    return `<div class="settings-row is-stacked"><label class="settings-label" for="${id}">${label}</label><textarea ${common} rows="3">${escapeHtml(String(value))}</textarea></div>`;
+  }
+  return `<div class="settings-row"><label class="settings-label" for="${id}">${label}</label><input ${common} type="text" value="${escapeHtml(String(value))}"/></div>`;
+}
+
+function renderSettingsBody() {
+  const draft = state.settingsDraft || { ...state.config };
+  const loggedIn = state.userInfo?.logged_in === true;
+  const groups = ["appearance", "dashboard", "copy"]
+    .map(section => {
+      const rows = THEME_SETTINGS.filter(meta => meta.section === section).map(meta => renderSettingControl(meta, draft)).join("");
+      return `<section class="settings-group"><h3>${escapeHtml(localizedValue(SECTION_LABELS[section], state.language))}</h3>${rows}</section>`;
+    })
+    .join("");
+  const notice = state.turnstileBlocked
+    ? `<p class="settings-notice is-warning">${escapeHtml(t("settingsTurnstileHint"))}</p>`
+    : loggedIn
+      ? ""
+      : `<p class="settings-notice">${escapeHtml(t("settingsSignInHint"))}</p>`;
+  const disabled = !loggedIn || state.turnstileBlocked || state.settingsSaving;
+  return `<header class="settings-head"><div class="settings-head-copy"><div class="settings-title">${escapeHtml(t("themeSettings"))}</div><div class="settings-subtitle">${escapeHtml(t("settingsDraftHint"))}</div></div><button class="icon-button" type="button" data-action="close-settings" aria-label="${escapeHtml(t("close"))}">${icon("close")}</button></header>
+    <div class="settings-scroll">${notice}${groups}</div>
+    <footer class="settings-foot"><button class="secondary-button" type="button" data-action="reset-settings">${escapeHtml(t("settingsReset"))}</button><button class="action-button" type="button" data-action="save-settings"${disabled ? " disabled" : ""}>${escapeHtml(state.settingsSaving ? t("settingsSaving") : t("settingsSave"))}</button></footer>`;
+}
+
+function renderSettingsPanel() {
+  const open = state.settingsOpen;
+  return `<div class="settings-backdrop${open ? " is-open" : ""}" data-action="close-settings"></div>
+    <aside class="settings-panel${open ? " is-open" : ""}" role="dialog" aria-label="${escapeHtml(t("themeSettings"))}">${open ? renderSettingsBody() : ""}</aside>`;
+}
+
+function openSettings() {
+  state.settingsDraft = { ...state.config };
+  state.settingsOpen = true;
+  state.notificationsOpen = false;
+  state.mobileSearchOpen = false;
+  renderApp();
+}
+
+// 保存设置：读-改-写 `POST /api/theme_options`。
+// 契约（CFSM `theme-develop.md` + `src/index.js`）：body 为 { theme_options: {...} }，
+// 无论站点是否公开都必须带 JWT；该接口整对象替换 appearance_options.theme_options，
+// 所以必须先取回最新值再合并 —— 读失败则不写，宁可不存也不能抹掉其它主题的键。
+async function saveThemeSettings() {
+  if (state.settingsSaving) return;
+  if (state.userInfo?.logged_in !== true) {
+    showToast(t("themeSettings"), t("settingsSignInHint"), "warning");
+    return;
+  }
+  if (state.turnstileBlocked) {
+    showToast(t("themeSettings"), t("settingsTurnstileHint"), "warning");
+    return;
+  }
+  state.settingsSaving = true;
+  renderApp();
+  try {
+    const fresh = await api.getConfig({ timeout: 15000 });
+    const current = isRecord(fresh?.theme_options) ? fresh.theme_options : null;
+    if (!current) throw new Error(t("settingsReadFailed"));
+    const merged = mergeThemeSettings(current, state.settingsDraft || {});
+    const result = await api.saveThemeOptions(merged);
+    state.themeOptions = isRecord(result?.theme_options) ? result.theme_options : merged;
+    state.config = mergeConfig(readThemeSettings(state.themeOptions));
+    state.sort = state.config.default_sort;
+    state.settingsDraft = { ...state.config };
+    applyAppearance();
+    showToast(t("settingsSaved"), t("settingsSavedCopy"), "success");
+  } catch (error) {
+    showToast(t("settingsSaveFailed"), error instanceof Error ? error.message : String(error), "warning");
+  } finally {
+    state.settingsSaving = false;
+    renderApp();
+  }
+}
+
 async function loadTrafficHistory(force = false) {
   if (state.trafficHistoryLoading) return;
   if (!force && state.trafficHistoryLoadedAt && Date.now() - state.trafficHistoryLoadedAt < 5 * 60 * 1000) return;
@@ -2706,6 +2888,8 @@ async function openDrawer(uuid) {
   if (typeof uuid !== "string" || !uuid) return;
   resetMobileNavVisibility();
   state.drawerUuid = uuid;
+  // 同步地址栏（深链接 #/server/<id>）；applyHashRoute 幂等，重复触发不会递归
+  writeHash(`${HASH_SERVER_PREFIX}${encodeURIComponent(uuid)}`);
   const node = getNodeByUuid(uuid);
   state.drawerLoading = Boolean(node) && !state.demoMode;
   state.drawerRecords = null;
@@ -2742,12 +2926,14 @@ async function openDrawer(uuid) {
   }
 }
 
-function closeDrawer() {
+function closeDrawer({ syncHash = true } = {}) {
+  const hadDrawer = Boolean(state.drawerUuid);
   state.drawerUuid = null;
   state.drawerRecords = null;
   state.drawerLoading = false;
   document.body.style.overflow = "";
   resetMobileNavVisibility();
+  if (syncHash && hadDrawer) writeHash("#/");
   renderApp();
 }
 
@@ -2940,6 +3126,17 @@ function handleClick(event) {
     state.sidebarOpen = false;
     resetMobileNavVisibility();
     renderApp();
+  } else if (action === "open-settings") {
+    openSettings();
+  } else if (action === "close-settings") {
+    state.settingsOpen = false;
+    renderApp();
+  } else if (action === "reset-settings") {
+    state.settingsDraft = { ...DEFAULT_SETTINGS };
+    state.settingsOpen = true;
+    renderApp();
+  } else if (action === "save-settings") {
+    saveThemeSettings();
   } else if (action === "close-drawer") {
     if (actionElement.matches(".drawer-handle") && Date.now() < suppressDrawerHandleClickUntil) return;
     closeDrawer();
@@ -2985,6 +3182,12 @@ function handleGlobePortalClick(event) {
 }
 
 function handleInput(event) {
+  const setting = event.target.closest("[data-setting]");
+  if (setting && setting.tagName !== "SELECT") {
+    // 设置面板的文本框/数字框只写本地草稿，不触发整页重渲染
+    updateSettingDraft(setting.dataset.setting, event.target.value);
+    return;
+  }
   if (event.target.matches("#global-search, #mobile-search, #node-search")) {
     const inputId = event.target.id;
     state.query = event.target.value;
@@ -3008,7 +3211,10 @@ function handleChange(event) {
   if (event.target.matches("#node-sort")) {
     state.sort = event.target.value;
     renderApp();
+    return;
   }
+  const setting = event.target.closest("[data-setting]");
+  if (setting) updateSettingDraft(setting.dataset.setting, setting.type === "checkbox" ? setting.checked : setting.value);
 }
 
 function handleKeydown(event) {
@@ -3018,6 +3224,7 @@ function handleKeydown(event) {
   }
   if (event.key === "Escape") {
     if (state.globeOpen) closeGlobe();
+    else if (state.settingsOpen) { state.settingsOpen = false; renderApp(); }
     else if (state.drawerUuid) closeDrawer();
     else if (state.notificationsOpen) { state.notificationsOpen = false; renderApp(); }
     else if (state.mobileSearchOpen) { state.mobileSearchOpen = false; renderApp(); }
@@ -3221,6 +3428,8 @@ async function initialize() {
     state.loading = false;
     renderApp();
     if (state.currentView === "traffic") void loadTrafficHistory();
+    // 深链接：首次进入按 #/server/<id> 打开详情抽屉
+    applyHashRoute();
     if (new URLSearchParams(location.search).get("globe") === "1") openGlobe();
     startTimers();
   } catch (error) {
@@ -3369,6 +3578,7 @@ document.addEventListener("pointerup", handleDrawerPointerUp);
 document.addEventListener("pointercancel", handleDrawerPointerCancel);
 document.addEventListener("keydown", handleKeydown);
 document.addEventListener("error", handleFlagError, true);
+window.addEventListener("hashchange", applyHashRoute);
 document.addEventListener("visibilitychange", handleVisibilityChange);
 document.addEventListener("focusin", scheduleMobileInputState);
 document.addEventListener("focusout", () => setTimeout(scheduleMobileInputState, 0));
