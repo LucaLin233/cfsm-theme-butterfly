@@ -7405,3 +7405,75 @@ svg {
     width: 100vw;
   }
 }
+
+
+/* ===== CF-Server-Monitor 移植版新增（port-v0.5）：协议徽标与剩余流量 ===== */
+
+.ip-tag.is-v6 {
+  border-color: color-mix(in srgb, var(--cyan) 42%, transparent);
+  color: color-mix(in srgb, var(--cyan) 86%, var(--text-strong));
+}
+
+.node-traffic {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 58%, transparent);
+}
+
+.node-traffic.is-degraded {
+  border-top-style: dashed;
+}
+
+.node-traffic-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted-2);
+  font-size: 9.5px;
+}
+
+.node-traffic-value {
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+}
+
+.node-traffic-value small {
+  margin-left: 5px;
+  color: var(--muted-2);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.node-traffic-track {
+  height: 3px;
+  margin-top: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.node-traffic-usage {
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 78%, transparent);
+  transition: width 240ms ease;
+}
+
+.node-traffic.is-warm .node-traffic-usage {
+  background: color-mix(in srgb, var(--amber) 82%, transparent);
+}
+
+.node-traffic.is-danger .node-traffic-usage {
+  background: color-mix(in srgb, var(--red) 82%, transparent);
+}
+
+.node-traffic.is-warm .node-traffic-value {
+  color: var(--amber);
+}
+
+.node-traffic.is-danger .node-traffic-value {
+  color: var(--red);
+}

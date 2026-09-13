@@ -1,98 +1,91 @@
-# Komari Butterfly
+# Butterfly for CF-Server-Monitor
 
-> **CF-Server-Monitor port (self-hosted fork, work in progress).** This repository is a fork of
-> [TomorrowX6/Komari-Butterfly](https://github.com/TomorrowX6/Komari-Butterfly) being ported to
-> [CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor) as a private third-party
-> theme. Work happens on the `port` branch; `main` stays at the untouched upstream baseline.
->
-> The upstream instructions below are **out of date for this fork**: `komari-theme.json`,
-> `preview.png`, the packaged release ZIP, the bundled flag set and the Komari JSON-RPC data layer
-> are removed or being replaced. Deploy target is `theme_url` →
-> `https://github.com/LucaLin233/cfsm-theme-butterfly/tree/<commit-sha>/dist`; assets carry a
-> `?v=<package.json version>` query because CF-Server-Monitor serves theme assets as
-> `immutable`, so the version must be bumped on every pushed change.
+A WinUI 3 / Mica-inspired server dashboard, ported from
+[TomorrowX6/Komari-Butterfly](https://github.com/TomorrowX6/Komari-Butterfly) (MIT) to
+[CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor) as a **private, self-hosted
+third-party theme**. This is not a marketplace release; it is maintained for one instance.
 
 [简体中文](README.zh-CN.md) · English
 
-A clean, responsive theme for [Komari Monitor](https://github.com/komari-monitor/komari), inspired by WinUI 3 and Mica materials.
+## What changed compared to upstream
 
-## Highlights
+| Area | Upstream (Komari) | This port (CF-Server-Monitor) |
+|---|---|---|
+| Data layer | Komari JSON-RPC 2.0 (`/api/rpc2`), 9 call sites | REST: `GET /api/config`, `/api/servers`, `/api/server?id=`, `/api/history/all?id=&hours=` (`src/assets/cfsm-api.js`) |
+| Field mapping | native Komari model | `src/assets/cfsm-map.js` (units, traffic direction, monthly/all-time totals, line set, remaining traffic) |
+| Live updates | polling | polling every **30 s** by default (15–300 in settings), paused while the tab is hidden, with 30→60→120 s backoff on failures. No WebSocket. |
+| Settings | `komari-theme.json` manifest | in-theme panel → `POST /api/theme_options`, keys prefixed `butterfly_`, always read-modify-write |
+| Deep links | — | `#/` and `#/server/<id>` (drawer + browser back/forward) |
+| Flags | 272 bundled SVGs | same-origin `/flags/<lowercase>.svg` provided by CFSM |
+| Market packaging | `komari-theme.json`, `preview.png`, release ZIP | removed |
+| Added blocks | — | IPv4/IPv6 badges, remaining traffic (with degraded mode), expiry countdown, price & billing cycle, all-time inbound/outbound totals |
 
-- Layered Mica surfaces, restrained shadows, clear WinUI-style states, and five accent colors.
-- A tonal navy dark mode keeps search fields, controls, cards, and dialogs consistently dark instead of introducing bright white surfaces.
-- The **View global nodes** action opens a draggable globe with illuminated online, mixed, and offline regions. Select a region to focus it, inspect its local nodes, and open a node drawer.
-- Geographic placement accepts exact ISO alpha-2 region codes or a leading flag emoji, aggregates at country/region level, and never infers a city location.
-- Live metrics, latency distribution, region summaries, traffic charts, favorites, grid/list modes, and a node detail drawer.
-- Native Komari JSON-RPC 2.0 integration with no external runtime JavaScript, CSS, map, or geolocation services.
-- Managed theme settings for color mode, accent, density, corners, background, polling, sorting, visibility, copy, and footer.
-- Phones use a compact command bar, horizontally snapping KPI cards, sticky node controls, and direction-aware bottom navigation that leaves the content area while scrolling or while the on-screen keyboard is active. Search opens node results immediately, while live refreshes preserve focus and scroll position.
-- Node details become a safe-area-aware, swipe-to-dismiss bottom sheet with denser metrics and hardware information; the globe uses a full-screen region carousel, momentum-based touch rotation, and a lower-cost rendering profile.
-- Short portrait screens receive a reduced-height overview and globe stage; 320 × 568-class screens omit only the large hero while retaining KPI cards, placing filters and the first node clear of the floating navigation.
-- Keyboard search, reduced-motion support, short-landscape layouts, and English, Simplified Chinese, and Japanese interface copy.
+Direction mapping is deliberate and must stay fixed: the theme's `net_in` is **upload** and `net_out`
+is **download**, while CFSM's `net_in_speed` is download and `net_out_speed` is upload. Monthly totals
+use `net_tx_monthly` (up) / `net_rx_monthly` (down); all-time totals use `net_tx` / `net_rx`.
 
-## Install
+## Deploy
 
-1. Download `komari-butterfly-v1.5.0.zip` from GitHub Releases.
-2. Open the Komari admin panel and upload the ZIP in theme management.
-3. Select **Komari Butterfly** and save.
-
-The release ZIP keeps the Komari theme contract at its root:
+`theme_url` must point at a **pinned commit** and the `dist/` subdirectory:
 
 ```text
-komari-theme.json
-preview.png
-dist/
-  index.html
-  favicon.svg
-  assets/
-    app.js
-    region-data.js
-    world-data.js
-    styles.css
+https://github.com/LucaLin233/cfsm-theme-butterfly/tree/<commit-sha>/dist
 ```
 
-## Local preview
+* Pin the commit, not a branch — pushing to the branch would change a live site with no preview step.
+  To roll back, point `theme_url` at a previous stage tag's commit.
+* `theme_url` lives in `site_options` and is cached for ~120 s, so switching takes up to two minutes.
+* If the theme's `index.html` cannot be fetched the site returns `502 Theme index.html is unavailable`
+  and does **not** fall back to the built-in theme — recover through `/admin` by changing `theme_url`.
+
+### Asset versioning (important)
+
+CF-Server-Monitor serves theme assets with `Cache-Control: public, max-age=31536000, immutable`.
+Every asset reference therefore carries a version query string — `/assets/app.js?v=<version>` — and every
+module import does the same. **Bump `version` in `package.json` on each change**, otherwise the query
+string stays the same and browsers keep serving the cached copy (this is also what makes a rollback to an
+older commit look like "nothing happened").
+
+## Theme settings
+
+The gear button in the top bar opens the theme's own panel (16 settings, grouped appearance / dashboard /
+copy, labels in zh-CN, en, ja).
+
+* Saving writes `appearance_options.theme_options` through `POST /api/theme_options` (`{"theme_options": {…}}`).
+  That endpoint **replaces the whole object** and always requires `Authorization: Bearer <jwt>`, so the
+  panel reads `/api/config` immediately before writing and only merges its own `butterfly_*` keys.
+  Keys that belong to other themes (for example LuminaPlus) are preserved.
+* Not signed in → the panel is read-only; sign in at `/admin#admin` first.
+* Global Turnstile enabled → the panel stays read-only, because this port does not implement
+  `X-Turnstile-Token` / `X-Turnstile-Verified`.
+* Changes apply locally while you edit; nothing is written until you press *Save settings*.
+
+## Development
 
 ```bash
-npm run build
-python3 -m http.server 4173 --directory dist
+npm run check    # build into dist/ + structural validation
+npm run build    # copies src/ → dist/ and injects the version token
 ```
 
-Open `http://127.0.0.1:4173/?demo=1`. Use `?demo=1&theme=dark` for the dark preview and `?demo=1&theme=dark&globe=1` to open the globe directly.
+* Node ≥ 20, zero runtime dependencies.
+* `dist/` is committed and is what the site loads; CI fails if `dist/` does not match `src/`.
+* `scripts/validate.mjs` asserts the deployment contract: `dist/index.html` + `dist/assets/*`, the
+  `?v=` query on every module import, no leftover `__THEME_VERSION__`, no remote scripts, no bundled
+  flags, plus the mobile-layout contract tokens and that every module really exports the names `app.js`
+  imports.
 
-Demo mode is enabled only by the explicit `demo=1` query or by opening the page through `file://`. An API failure never silently replaces live data with demo nodes.
+## Known limitations
 
-## Build, validate, and package
-
-```bash
-npm run check
-npm run package
-```
-
-The package command creates:
-
-```text
-release/komari-butterfly-v1.5.0.zip
-release/komari-butterfly-v1.5.0.zip.sha256
-```
-
-## Release
-
-Update `version` in `komari-theme.json`, commit the change, create the matching tag, and push it:
-
-```bash
-git tag v1.5.0
-git push origin main --tags
-```
-
-The release workflow validates the tag against the manifest version, builds the theme, creates the ZIP and SHA256 file, and attaches both to the GitHub Release.
-
-## Configuration
-
-All settings are declared in `komari-theme.json` and managed through the Komari admin panel. The theme reads the exact `theme_settings` object returned by Komari public settings and applies only declared values.
-
-See [Design notes](docs/DESIGN.md) for the layout system and visual decisions.
+* `ping_bd` (BGP) reports 1–2 ms on most machines, which is not a plausible RTT for a home line to US/JP.
+  BGP is still displayed in the line-latency panel, but it is **excluded** from "best latency"
+  (card pill, latency histogram, region averages, drawer stat, latency sorting).
+* No data source in CFSM for: virtualization type, IPv4/IPv6 address text, GPU (all empty here),
+  CPU temperature, Komari-style `public_remark`. Those rows are hidden instead of showing "unknown".
+* The traffic view fetches 24 h of history per node (12 nodes ≈ 12 requests, a few hundred KB) and
+  throttles to once per 5 minutes.
+* The upstream `TW → CN` flag special case is not reproduced.
 
 ## License
 
-MIT © TomorrowX6
+MIT, as upstream. Upstream author: [TomorrowX6](https://github.com/TomorrowX6). Ported and maintained by
+[LucaLin233](https://github.com/LucaLin233).

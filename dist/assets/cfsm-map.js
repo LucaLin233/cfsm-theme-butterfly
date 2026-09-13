@@ -228,6 +228,8 @@ export function mapNode(raw) {
       agentVersion: typeof raw.agent_version === "string" ? raw.agent_version : "",
       historyPartitionId: toNumber(raw.history_partition_id),
       timestamp: toNumber(raw.timestamp),
+      // 剩余流量在映射层算好（含空限额降级），视图只管展示
+      remaining: remainingTraffic(raw),
     },
   };
 }

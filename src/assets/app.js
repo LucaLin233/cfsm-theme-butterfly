@@ -104,6 +104,20 @@ const STRINGS = {
     settingsSaveFailed: "保存失败",
     settingsReadFailed: "读取现有设置失败，已取消写入。",
     settingsReset: "恢复默认",
+    remainingTraffic: "剩余流量",
+    usedThisMonth: "当月已用",
+    billing: "计费与流量",
+    trafficOut: "出站累计（全时）",
+    trafficIn: "入站累计（全时）",
+    priceLabel: "价格",
+    expiresAt: "到期",
+    expiresIn: "{days} 天后到期",
+    expired: "已过期",
+    autoRenewal: "自动续费",
+    resetDay: "重置日",
+    monthReset: "每月 {day} 日重置",
+    yes: "是",
+    no: "否",
     excellent: "优秀",
     good: "良好",
     fair: "一般",
@@ -125,7 +139,7 @@ const STRINGS = {
     globalCoverage: "全球覆盖",
     globalCoverageCopy: "{regions} 个区域 · {nodes} 个节点",
     openSource: "开放源码",
-    openSourceCopy: "由 Komari 社区共同构建",
+    openSourceCopy: "上游原主题：TomorrowX6/Komari-Butterfly（MIT）",
     cpu: "CPU",
     memory: "内存",
     disk: "磁盘",
@@ -176,15 +190,15 @@ const STRINGS = {
     yesterdayAt: "昨天 {time}",
     trafficHistoryLoading: "正在汇总节点流量记录…",
     trafficNoHistory: "暂无流量记录",
-    aboutDescription: "Butterfly 将 WinUI 3 的克制层次、Mica 质感与 Komari 的实时数据结合，强调清晰、快速与响应式体验。",
+    aboutDescription: "Butterfly 把 WinUI 3 的克制层次与 Mica 质感，结合 CF-Server-Monitor 的实时数据，强调清晰、快速与响应式体验。",
     designLanguage: "WinUI 设计语言",
     designLanguageCopy: "使用层级表面、柔和圆角、清晰状态与精确间距构建信息密集型仪表盘。",
-    nativeIntegration: "原生 Komari 集成",
-    nativeIntegrationCopy: "通过 Komari JSON-RPC 2.0 接口读取节点、状态、历史记录、公开设置与登录状态。",
+    nativeIntegration: "原生 CF-Server-Monitor 集成",
+    nativeIntegrationCopy: "通过站点 REST 接口（/api/config、/api/servers、/api/history/all）读取节点、状态、历史与站点设置。",
     responsive: "响应式布局",
     responsiveCopy: "桌面端保留高信息密度，平板与手机自动切换为单栏和底部导航。",
     themeVersion: "主题版本",
-    komariVersion: "Komari 版本",
+    komariVersion: "站点版本",
     sourceCode: "源代码",
     connected: "已连接",
     disconnected: "连接中断",
@@ -212,8 +226,8 @@ const STRINGS = {
     gridView: "网格视图",
     listView: "列表视图",
     themeToggle: "切换明暗模式",
-    footer: "Komari Butterfly {theme} · Komari {komari}",
-    poweredBy: "基于 Komari",
+    footer: "Powered by CF-Server-Monitor {komari} · Butterfly {theme}",
+    poweredBy: "CF-Server-Monitor",
     refresh: "刷新数据",
     offlineData: "数据连接暂时不可用",
   },
@@ -274,6 +288,20 @@ const STRINGS = {
     settingsSaveFailed: "Save failed",
     settingsReadFailed: "Could not read the current settings, so nothing was written.",
     settingsReset: "Reset to defaults",
+    remainingTraffic: "Remaining",
+    usedThisMonth: "Used this month",
+    billing: "Billing & traffic",
+    trafficOut: "Outbound (all time)",
+    trafficIn: "Inbound (all time)",
+    priceLabel: "Price",
+    expiresAt: "Expires",
+    expiresIn: "in {days} d",
+    expired: "expired",
+    autoRenewal: "Auto renewal",
+    resetDay: "Reset day",
+    monthReset: "resets on day {day}",
+    yes: "Yes",
+    no: "No",
     excellent: "Excellent",
     good: "Good",
     fair: "Fair",
@@ -295,7 +323,7 @@ const STRINGS = {
     globalCoverage: "Global coverage",
     globalCoverageCopy: "{regions} regions · {nodes} nodes",
     openSource: "Open source",
-    openSourceCopy: "Built by the Komari community",
+    openSourceCopy: "Upstream theme: TomorrowX6/Komari-Butterfly (MIT)",
     cpu: "CPU",
     memory: "Memory",
     disk: "Disk",
@@ -346,15 +374,15 @@ const STRINGS = {
     yesterdayAt: "Yesterday {time}",
     trafficHistoryLoading: "Aggregating node traffic records…",
     trafficNoHistory: "No traffic records yet",
-    aboutDescription: "Butterfly combines the restrained hierarchy and Mica material of WinUI 3 with Komari live data for a clear, fast, responsive experience.",
+    aboutDescription: "Butterfly combines the restrained hierarchy and Mica material of WinUI 3 with CF-Server-Monitor live data for a clear, fast, responsive experience.",
     designLanguage: "WinUI design language",
     designLanguageCopy: "Layered surfaces, soft corners, clear states, and precise spacing for an information-dense dashboard.",
-    nativeIntegration: "Native Komari integration",
-    nativeIntegrationCopy: "Reads nodes, live status, history, public settings, and login state through Komari JSON-RPC 2.0.",
+    nativeIntegration: "Native CF-Server-Monitor integration",
+    nativeIntegrationCopy: "Reads nodes, live status, history, and site settings through the REST API (/api/config, /api/servers, /api/history/all).",
     responsive: "Responsive layout",
     responsiveCopy: "High information density on desktop, automatic single-column and bottom navigation on smaller screens.",
     themeVersion: "Theme version",
-    komariVersion: "Komari version",
+    komariVersion: "Site version",
     sourceCode: "Source code",
     connected: "Connected",
     disconnected: "Disconnected",
@@ -382,8 +410,8 @@ const STRINGS = {
     gridView: "Grid view",
     listView: "List view",
     themeToggle: "Toggle color scheme",
-    footer: "Komari Butterfly {theme} · Komari {komari}",
-    poweredBy: "Powered by Komari",
+    footer: "Powered by CF-Server-Monitor {komari} · Butterfly {theme}",
+    poweredBy: "CF-Server-Monitor",
     refresh: "Refresh data",
     offlineData: "The data connection is temporarily unavailable",
   },
@@ -444,6 +472,20 @@ const STRINGS = {
     settingsSaveFailed: "保存に失敗しました",
     settingsReadFailed: "現在の設定を読み取れなかったため、書き込みを中止しました。",
     settingsReset: "既定値に戻す",
+    remainingTraffic: "残り通信量",
+    usedThisMonth: "今月の使用量",
+    billing: "課金と通信量",
+    trafficOut: "送信累計（全期間）",
+    trafficIn: "受信累計（全期間）",
+    priceLabel: "価格",
+    expiresAt: "期限",
+    expiresIn: "{days} 日後",
+    expired: "期限切れ",
+    autoRenewal: "自動更新",
+    resetDay: "リセット日",
+    monthReset: "毎月 {day} 日にリセット",
+    yes: "はい",
+    no: "いいえ",
     excellent: "非常に良い",
     good: "良好",
     fair: "普通",
@@ -465,7 +507,7 @@ const STRINGS = {
     globalCoverage: "グローバルカバレッジ",
     globalCoverageCopy: "{regions} リージョン · {nodes} ノード",
     openSource: "オープンソース",
-    openSourceCopy: "Komari コミュニティによって構築",
+    openSourceCopy: "上流テーマ：TomorrowX6/Komari-Butterfly（MIT）",
     cpu: "CPU",
     memory: "メモリ",
     disk: "ディスク",
@@ -516,15 +558,15 @@ const STRINGS = {
     yesterdayAt: "昨日 {time}",
     trafficHistoryLoading: "ノード通信記録を集計中…",
     trafficNoHistory: "通信記録はまだありません",
-    aboutDescription: "Butterfly は WinUI 3 の抑制された階層と Mica 素材を Komari のライブデータと組み合わせ、明快で高速なレスポンシブ体験を提供します。",
+    aboutDescription: "Butterfly は WinUI 3 の抑制された階層と Mica 素材を CF-Server-Monitor のライブデータと組み合わせ、明快で高速なレスポンシブ体験を提供します。",
     designLanguage: "WinUI デザイン言語",
     designLanguageCopy: "階層化された面、柔らかな角丸、明確な状態、正確な間隔で高密度なダッシュボードを構成します。",
-    nativeIntegration: "Komari ネイティブ統合",
-    nativeIntegrationCopy: "Komari JSON-RPC 2.0 からノード、ライブ状態、履歴、公開設定、ログイン状態を取得します。",
+    nativeIntegration: "CF-Server-Monitor ネイティブ統合",
+    nativeIntegrationCopy: "サイトの REST API（/api/config、/api/servers、/api/history/all）からノード、状態、履歴、サイト設定を取得します。",
     responsive: "レスポンシブレイアウト",
     responsiveCopy: "デスクトップでは高密度、狭い画面では自動的に 1 列と下部ナビゲーションへ切り替わります。",
     themeVersion: "テーマ版",
-    komariVersion: "Komari 版",
+    komariVersion: "サイト版",
     sourceCode: "ソースコード",
     connected: "接続済み",
     disconnected: "未接続",
@@ -552,8 +594,8 @@ const STRINGS = {
     gridView: "グリッド表示",
     listView: "リスト表示",
     themeToggle: "配色を切り替え",
-    footer: "Komari Butterfly {theme} · Komari {komari}",
-    poweredBy: "Komari を使用",
+    footer: "Powered by CF-Server-Monitor {komari} · Butterfly {theme}",
+    poweredBy: "CF-Server-Monitor",
     refresh: "データを更新",
     offlineData: "データ接続を利用できません",
   },
@@ -2011,7 +2053,7 @@ function renderApp() {
   }
   const continuity = captureRenderContinuity();
   const metrics = aggregateMetrics();
-  const brand = state.config.brand_text.trim() || String(state.publicInfo.sitename || "Komari");
+  const brand = state.config.brand_text.trim() || String(state.publicInfo.sitename || "CF-Server-Monitor");
   const currentViewTitle = t(state.currentView === "favorites" ? "favorites" : state.currentView);
   const userName = state.userInfo?.logged_in ? state.userInfo.username || "Admin" : t("signIn");
   const sidebarClass = state.sidebarCollapsed ? " sidebar-collapsed" : "";
@@ -2299,7 +2341,10 @@ function renderNodeCard(node, index) {
   const samples = state.nodeSamples.get(node.uuid) || [cpu, cpu];
   const favorite = state.favorites.has(node.uuid);
   const totalTraffic = finiteNumber(status.net_total_up) + finiteNumber(status.net_total_down);
-  const ipTags = state.config.show_ip_tags ? [node.ipv4 ? `<span class="ip-tag">IPv4 ${escapeHtml(node.ipv4)}</span>` : "", node.ipv6 ? `<span class="ip-tag">IPv6 ${escapeHtml(node.ipv6)}</span>` : ""].join("") : "";
+  // CFSM 的 ip_v4/ip_v6 是可达性标志（"1"/"0"），不是地址文本 → 渲染成协议徽标
+  const protocolTags = state.config.show_ip_tags
+    ? [node.cfsm?.ipV4 === "1" ? `<span class="ip-tag">IPv4</span>` : "", node.cfsm?.ipV6 === "1" ? `<span class="ip-tag is-v6">IPv6</span>` : ""].join("")
+    : "";
   const nodeName = String(node.name || node.uuid);
   return `<article class="node-card${online ? "" : " is-offline"}" style="--node-accent:${color}">
     <button class="node-card-open" type="button" data-node-uuid="${escapeHtml(node.uuid)}" aria-label="${escapeHtml(`${nodeName} · ${t("nodeDetails")}`)}"></button>
@@ -2313,9 +2358,25 @@ function renderNodeCard(node, index) {
       <div class="node-meters">${meter(t("cpu"), cpu)}${meter(t("memory"), memory)}${meter(t("disk"), disk, disk > 82 ? "var(--red)" : undefined)}</div>
       ${lineChart(samples)}
     </div>
-    ${ipTags ? `<div class="ip-tags">${ipTags}</div>` : ""}
+    ${protocolTags ? `<div class="ip-tags">${protocolTags}</div>` : ""}
+    ${renderRemainingTraffic(node)}
     <div class="node-footer"><span class="node-footer-item">↑ ${escapeHtml(formatRate(status.net_in))} · ↓ ${escapeHtml(formatRate(status.net_out))}</span><span class="node-footer-item">${escapeHtml(formatBytes(totalTraffic))}</span><span class="node-footer-item">${escapeHtml(formatDuration(status.uptime))}</span></div>
   </article>`;
+}
+
+// 剩余流量条：限额为空或 ≤0 的机器（实例中"香港Azure""日本Azure"）降级显示当月已用，
+// 不画进度条、不出现 NaN。
+function renderRemainingTraffic(node) {
+  const remaining = node?.cfsm?.remaining;
+  if (!remaining) return "";
+  if (remaining.degraded) {
+    return `<div class="node-traffic is-degraded"><div class="node-traffic-head"><span class="node-traffic-label">${escapeHtml(t("usedThisMonth"))}</span><span class="node-traffic-value">${escapeHtml(formatBytes(remaining.usedBytes, 2))}</span></div></div>`;
+  }
+  const percentUsed = clamp(remaining.percent ?? 0, 0, 100);
+  const rawPercent = Number.isFinite(remaining.percent) ? remaining.percent : 0;
+  const tone = rawPercent >= 95 ? " is-danger" : rawPercent >= 80 ? " is-warm" : "";
+  const resetText = remaining.resetDay ? t("monthReset", { day: remaining.resetDay }) : "";
+  return `<div class="node-traffic${tone}"${resetText ? ` title="${escapeHtml(resetText)}"` : ""}><div class="node-traffic-head"><span class="node-traffic-label">${escapeHtml(t("remainingTraffic"))}</span><span class="node-traffic-value">${escapeHtml(formatBytes(remaining.remainingBytes, 2))}<small>${escapeHtml(`${rawPercent.toFixed(1)}%`)}</small></span></div><div class="node-traffic-track"><div class="node-traffic-usage" style="width:${percentUsed.toFixed(2)}%"></div></div></div>`;
 }
 
 function meter(label, value, color) {
@@ -2584,7 +2645,7 @@ function renderTrafficView(metrics) {
 function renderAboutView() {
   const description = state.publicInfo.description || t("aboutDescription");
   return `<section class="about-view">
-    <article class="about-hero"><div class="about-logo">${butterflyLogo()}</div><h1 class="about-title">Komari Butterfly</h1><p class="about-description">${escapeHtml(description)}</p><div class="about-badges"><span class="about-badge">${icon("activity", 13)} ${escapeHtml(t("themeVersion"))} ${escapeHtml(THEME_VERSION)}</span><span class="about-badge">${icon("server", 13)} ${escapeHtml(t("komariVersion"))} ${escapeHtml(state.version.version || "unknown")}</span><a class="about-badge" href="${THEME_REPOSITORY}" target="_blank" rel="noreferrer">${icon("github", 13)} ${escapeHtml(t("sourceCode"))}</a></div></article>
+    <article class="about-hero"><div class="about-logo">${butterflyLogo()}</div><h1 class="about-title">Butterfly</h1><p class="about-description">${escapeHtml(description)}</p><div class="about-badges"><span class="about-badge">${icon("activity", 13)} ${escapeHtml(t("themeVersion"))} ${escapeHtml(THEME_VERSION)}</span><span class="about-badge">${icon("server", 13)} ${escapeHtml(t("komariVersion"))} ${escapeHtml(state.version.version || "unknown")}</span><a class="about-badge" href="${THEME_REPOSITORY}" target="_blank" rel="noreferrer">${icon("github", 13)} ${escapeHtml(t("sourceCode"))}</a></div></article>
     <div class="about-grid">${aboutCard("panelLeft", "designLanguage", "designLanguageCopy")}${aboutCard("network", "nativeIntegration", "nativeIntegrationCopy")}${aboutCard("grid", "responsive", "responsiveCopy")}</div>
   </section>`;
 }
@@ -2618,7 +2679,7 @@ function renderDrawer() {
   const disk = percent(status.disk, status.disk_total || node.disk_total);
   return `<button class="drawer-handle" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}"><span></span></button><div class="drawer-scroll"><header class="drawer-header"><span class="drawer-node-flag">${regionFlag(node.region)}</span><div class="drawer-title"><h2>${escapeHtml(node.name || node.uuid)}</h2><p>${escapeHtml(nodeSubtitle(node))}</p></div><button class="icon-button drawer-close" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}">${icon("close")}</button></header>
     <div class="drawer-body"><div class="drawer-status-strip">${drawerStat(t("cpu"), formatPercent(status.cpu))}${drawerStat(t("memory"), formatPercent(memory))}${drawerStat(t("disk"), formatPercent(disk))}${drawerStat(t("averageLatency"), latency === null ? "—" : `${Math.round(latency)} ms`)}</div>
-      ${state.drawerLoading ? `<div class="drawer-loading"><div><div class="drawer-loading-spinner"></div>${escapeHtml(t("loadingDetails"))}</div></div>` : `${renderDrawerCharts(node, status)}${renderDrawerLines(node, status)}`}
+      ${state.drawerLoading ? `<div class="drawer-loading"><div><div class="drawer-loading-spinner"></div>${escapeHtml(t("loadingDetails"))}</div></div>` : `${renderDrawerCharts(node, status)}${renderDrawerLines(node, status)}${renderBilling(node, status)}`}
       ${renderHardware(node, status)}
     </div></div>`;
 }
@@ -2667,6 +2728,41 @@ function renderDrawerLines(node, status) {
     })
     .join("");
   return `<section class="drawer-section"><div class="drawer-section-heading"><h3>${escapeHtml(t("threeNetLatency"))}</h3><span class="connection-pill">${escapeHtml(t("lossRate"))}</span></div>${rows}</section>`;
+}
+
+// 到期天数：CFSM 的 expire_date 是日期串（如 "2026-10-01"），非法/缺失则不显示该项
+function expireDays(dateString) {
+  const time = new Date(dateString).getTime();
+  if (!Number.isFinite(time)) return null;
+  return Math.ceil((time - Date.now()) / 86400000);
+}
+
+// 计费与流量（增补块）：剩余流量、全时出/入站累计、价格与周期、到期、自动续费、重置日
+function renderBilling(node, status) {
+  const cfsm = node?.cfsm || {};
+  const remaining = cfsm.remaining || null;
+  const items = [];
+  if (remaining && !remaining.degraded && Number.isFinite(remaining.remainingBytes)) {
+    items.push([t("remainingTraffic"), formatBytes(remaining.remainingBytes, 2)]);
+  }
+  items.push([t("trafficOut"), formatBytes(status.cfsm_net_tx, 2)]);
+  items.push([t("trafficIn"), formatBytes(status.cfsm_net_rx, 2)]);
+  if (Number.isFinite(cfsm.price)) {
+    const cycle = cfsm.billingCycle ? ` / ${cfsm.billingCycle}` : "";
+    items.push([t("priceLabel"), `${cfsm.currency || ""}${cfsm.price}${cycle}`]);
+  }
+  if (cfsm.expireDate) {
+    const days = expireDays(cfsm.expireDate);
+    const suffix = days === null ? "" : days >= 0 ? `（${t("expiresIn", { days })}）` : `（${t("expired")}）`;
+    items.push([t("expiresAt"), `${cfsm.expireDate}${suffix}`]);
+  }
+  if (cfsm.expireDate || Number.isFinite(cfsm.price)) items.push([t("autoRenewal"), cfsm.autoRenewal ? t("yes") : t("no")]);
+  if (remaining?.resetDay) items.push([t("resetDay"), t("monthReset", { day: remaining.resetDay })]);
+  if (!items.length) return "";
+  const rows = items
+    .map(([label, value]) => `<div class="hardware-item"><div class="hardware-item-label">${escapeHtml(label)}</div><div class="hardware-item-value" title="${escapeHtml(String(value))}">${escapeHtml(String(value))}</div></div>`)
+    .join("");
+  return `<section class="drawer-section"><div class="drawer-section-heading"><h3>${escapeHtml(t("billing"))}</h3></div><div class="hardware-grid">${rows}</div></section>`;
 }
 
 function renderHardware(node, status) {

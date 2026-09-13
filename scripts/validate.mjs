@@ -109,6 +109,16 @@ for (const [token, label] of versionedImports) {
     errors.push(`dist/assets/app.js must import ${label} with the ?v=${version} cache-busting query`);
   }
 }
+// CFSM 主题契约：页脚必须署名 CF-Server-Monitor，管理入口指向站点后台，且不得实现管理页
+if (!/footer:\s*"Powered by CF-Server-Monitor/.test(appSource)) {
+  errors.push("the footer string must contain 'Powered by CF-Server-Monitor'");
+}
+if (!appSource.includes('"/admin#admin"')) {
+  errors.push("the admin entry points must target /admin#admin");
+}
+if (/save_settings|\/api\/login/.test(appSource)) {
+  errors.push("the theme must not call admin-only APIs (no admin page in a third-party theme)");
+}
 if (!appSource.includes("/api/theme_options")) {
   errors.push("dist/assets/app.js must wire the theme settings save endpoint");
 }
