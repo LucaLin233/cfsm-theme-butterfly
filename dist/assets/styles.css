@@ -7108,3 +7108,143 @@ svg {
     background: var(--surface-solid);
   }
 }
+
+
+/* ===== CF-Server-Monitor 移植版新增（port-v0.3） ===== */
+
+/* 机器名可能较长（如「日本Fxtransit-JMS」）：最多折两行再省略，避免截断到无法辨认 */
+.node-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* 未知/未配置地区码时 /flags/<code>.svg 返回 HTML，<img> 破图 → 回退为地球图标 */
+.country-flag-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: var(--muted-2);
+}
+
+/* 概览面板中的线路级延迟摘要（电信/联通/移动/BGP） */
+.line-summary {
+  display: grid;
+  margin-top: 14px;
+  gap: 6px;
+}
+
+.line-summary-title {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 640;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.line-summary-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-subtle) 78%, transparent);
+}
+
+.line-summary-name {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 11px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line-summary-metrics {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-2);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.line-summary-avg {
+  color: var(--text);
+  font-weight: 620;
+}
+
+.line-summary-loss.is-warm,
+.line-row-loss.is-warm {
+  color: var(--amber);
+}
+
+/* 详情抽屉的线路行与迷你柱 */
+.line-row {
+  padding: 8px 0;
+}
+
+.line-row + .line-row {
+  border-top: 1px solid color-mix(in srgb, var(--line) 62%, transparent);
+}
+
+.line-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.line-row-name {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 11px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line-row-value {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+}
+
+.line-row-loss {
+  min-width: 42px;
+  color: var(--muted-2);
+  font-size: 10px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.line-spark {
+  display: flex;
+  height: 22px;
+  margin-top: 6px;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.line-spark-bar {
+  flex: 1 1 0;
+  min-width: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--cyan) 62%, transparent);
+}
+
+/* 抽屉里的"未找到该机器"提示 */
+.drawer-empty {
+  padding: 24px 4px;
+  color: var(--muted-2);
+  font-size: 12px;
+  line-height: 1.6;
+}

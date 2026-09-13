@@ -87,6 +87,10 @@ const STRINGS = {
     globeOpenNode: "打开节点",
     globeBackToNodes: "查看全部节点",
     latencyDistribution: "延迟分布",
+    threeNetLatency: "线路延迟",
+    lossRate: "丢包",
+    nodeNotFound: "未找到该机器",
+    nodeNotFoundCopy: "该机器可能已被删除、设为隐藏，或链接有误。",
     excellent: "优秀",
     good: "良好",
     fair: "一般",
@@ -242,6 +246,10 @@ const STRINGS = {
     globeOpenNode: "Open node",
     globeBackToNodes: "View all nodes",
     latencyDistribution: "Latency distribution",
+    threeNetLatency: "Line latency",
+    lossRate: "Loss",
+    nodeNotFound: "Server not found",
+    nodeNotFoundCopy: "It may have been deleted, hidden, or the link is wrong.",
     excellent: "Excellent",
     good: "Good",
     fair: "Fair",
@@ -397,6 +405,10 @@ const STRINGS = {
     globeOpenNode: "ノードを開く",
     globeBackToNodes: "すべてのノードを見る",
     latencyDistribution: "遅延分布",
+    threeNetLatency: "回線レイテンシ",
+    lossRate: "ロス",
+    nodeNotFound: "サーバーが見つかりません",
+    nodeNotFoundCopy: "削除されたか、非表示に設定されている可能性があります。",
     excellent: "非常に良い",
     good: "良好",
     fair: "普通",
@@ -891,6 +903,17 @@ function regionFlag(region) {
   if (!code) return icon("globe", 14);
   // 旗帜改由 CFSM 同源提供（小写两位码）；主题不再打包 272 个 SVG。
   return `<img class="country-flag" src="/flags/${code.toLowerCase()}.svg" alt="" loading="lazy" decoding="async"/>`;
+}
+
+// 未知/未配置的地区码会让 /flags/<code>.svg 返回 200 text/html（不是图片），
+// <img> 只会静默破图 → 捕获 error 换回地球图标（捕获阶段，图片 error 不冒泡）。
+function handleFlagError(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLImageElement) || !target.classList.contains("country-flag")) return;
+  const fallback = document.createElement("span");
+  fallback.className = "country-flag country-flag-fallback";
+  fallback.innerHTML = icon("globe", 14);
+  target.replaceWith(fallback);
 }
 
 function regionDisplayName(region) {
@@ -2089,6 +2112,41 @@ function latencyBuckets() {
   return { values, buckets };
 }
 
+// 线路级摘要（电信/联通/移动/BGP，名称取自 CFSM 的 custom_*_name）：只统计在线机器；
+// 某条线路在所有机器上都没有数值时整块不渲染（未配置的线路 CFSM 会给 false）。
+function lineSummary() {
+  const rows = new Map();
+  for (const node of state.nodes) {
+    const status = nodeStatus(node.uuid);
+    if (!status || status.online !== true) continue;
+    for (const [id, line] of Object.entries(status.ping || {})) {
+      if (!isRecord(line)) continue;
+      const entry = rows.get(id) || { id, name: line.name || id, values: [], loss: 0 };
+      if (typeof line.name === "string" && line.name) entry.name = line.name;
+      if (Number.isFinite(line.latest)) entry.values.push(line.latest);
+      if (Number.isFinite(line.loss)) entry.loss = Math.max(entry.loss, line.loss);
+      rows.set(id, entry);
+    }
+  }
+  return [...rows.values()]
+    .map(entry => ({
+      ...entry,
+      average: entry.values.length ? entry.values.reduce((total, value) => total + value, 0) / entry.values.length : null,
+      best: entry.values.length ? Math.min(...entry.values) : null,
+      nodes: entry.values.length,
+    }))
+    .sort((a, b) => (a.average ?? Number.POSITIVE_INFINITY) - (b.average ?? Number.POSITIVE_INFINITY));
+}
+
+function renderLineSummary() {
+  const lines = lineSummary();
+  if (!lines.length) return "";
+  const items = lines
+    .map(line => `<div class="line-summary-item"><span class="line-summary-name">${escapeHtml(line.name)}</span><span class="line-summary-metrics"><span class="line-summary-avg">${line.average === null ? escapeHtml(t("noLatency")) : `${Math.round(line.average)} ms`}</span><span class="line-summary-best">min ${line.best === null ? "—" : `${Math.round(line.best)} ms`}</span><span class="line-summary-loss${line.loss > 0 ? " is-warm" : ""}">${line.loss.toFixed(1)}%</span></span></div>`)
+    .join("");
+  return `<div class="line-summary"><div class="line-summary-title">${escapeHtml(t("threeNetLatency"))}</div>${items}</div>`;
+}
+
 function renderLatencyPanel() {
   const { values, buckets } = latencyBuckets();
   const histogram = Array.from({ length: 24 }, (_, index) => {
@@ -2104,6 +2162,7 @@ function renderLatencyPanel() {
     <div class="latency-chart">${histogram.map((count, index) => `<span class="latency-bar-wrap"><span class="latency-bar${index > 9 ? " is-warm" : ""}" style="height:${Math.max(6, (count / max) * 100)}%;animation-delay:${index * 18}ms"></span></span>`).join("")}</div>
     <div class="latency-axis">${ranges.map(range => `<span>${escapeHtml(range)}</span>`).join("")}</div>
     <div class="latency-legend">${buckets.map((count, index) => `<div class="latency-legend-item"><div class="latency-legend-value">${count}</div><div class="latency-legend-label">${escapeHtml(labels[index])}</div></div>`).join("")}</div>
+    ${renderLineSummary()}
   </article>`;
 }
 
@@ -2501,17 +2560,24 @@ function mobileGlobeNavItem() {
 }
 
 function renderDrawer() {
+  if (!state.drawerUuid) return "";
   const node = getNodeByUuid(state.drawerUuid);
-  if (!node) return "";
+  // 已删除/已隐藏/深链接有误：给"未找到"反馈，不留空抽屉
+  if (!node) return renderDrawerMissing(state.drawerUuid);
   const status = nodeStatus(node.uuid) || {};
   const latency = bestLatency(status);
   const memory = percent(status.ram, status.ram_total || node.mem_total);
   const disk = percent(status.disk, status.disk_total || node.disk_total);
   return `<button class="drawer-handle" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}"><span></span></button><div class="drawer-scroll"><header class="drawer-header"><span class="drawer-node-flag">${regionFlag(node.region)}</span><div class="drawer-title"><h2>${escapeHtml(node.name || node.uuid)}</h2><p>${escapeHtml(nodeSubtitle(node))}</p></div><button class="icon-button drawer-close" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}">${icon("close")}</button></header>
     <div class="drawer-body"><div class="drawer-status-strip">${drawerStat(t("cpu"), formatPercent(status.cpu))}${drawerStat(t("memory"), formatPercent(memory))}${drawerStat(t("disk"), formatPercent(disk))}${drawerStat(t("averageLatency"), latency === null ? "—" : `${Math.round(latency)} ms`)}</div>
-      ${state.drawerLoading ? `<div class="drawer-loading"><div><div class="drawer-loading-spinner"></div>${escapeHtml(t("loadingDetails"))}</div></div>` : renderDrawerCharts(node, status)}
+      ${state.drawerLoading ? `<div class="drawer-loading"><div><div class="drawer-loading-spinner"></div>${escapeHtml(t("loadingDetails"))}</div></div>` : `${renderDrawerCharts(node, status)}${renderDrawerLines(node, status)}`}
       ${renderHardware(node, status)}
     </div></div>`;
+}
+
+function renderDrawerMissing(uuid) {
+  return `<button class="drawer-handle" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}"><span></span></button><div class="drawer-scroll"><header class="drawer-header"><span class="drawer-node-flag">${icon("globe", 14)}</span><div class="drawer-title"><h2>${escapeHtml(t("nodeNotFound"))}</h2><p>${escapeHtml(uuid)}</p></div><button class="icon-button drawer-close" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}">${icon("close")}</button></header>
+    <div class="drawer-body"><div class="drawer-empty">${escapeHtml(t("nodeNotFoundCopy"))}</div></div></div>`;
 }
 
 function drawerStat(label, value) {
@@ -2532,6 +2598,29 @@ function renderDrawerCharts(node, status) {
     <section class="drawer-section"><div class="drawer-section-heading"><h3>${escapeHtml(t("networkActivity"))}</h3><div class="chart-legend"><span class="chart-legend-item"><span class="chart-legend-line"></span>${escapeHtml(t("download"))}</span><span class="chart-legend-item"><span class="chart-legend-line" style="--legend-color:var(--cyan)"></span>${escapeHtml(t("upload"))}</span></div></div><div class="drawer-chart">${dualLineChart(download, upload, 620, 130)}</div></section>`;
 }
 
+// 线路级近期延迟：迷你柱用列表缓存里的 20 点窗口（`/api/server` 不返回窗口数组）。
+function renderDrawerLines(node, status) {
+  const lines = Object.values(status.ping || {}).filter(isRecord);
+  if (!lines.length) return "";
+  const window = Array.isArray(node?.cfsm?.latencyWindow) ? node.cfsm.latencyWindow : [];
+  const rows = lines
+    .map(line => {
+      const samples = window
+        .map(point => finiteNumber(point?.[line.id], -1))
+        .filter(value => value >= 0)
+        .slice(-20);
+      const max = samples.length ? Math.max(...samples) : 0;
+      const bars = samples
+        .map(value => `<span class="line-spark-bar" style="height:${max > 0 ? Math.max(12, Math.round((value / max) * 100)) : 12}%"></span>`)
+        .join("");
+      const loss = finiteNumber(line.loss);
+      const latest = Number.isFinite(line.latest) ? `${Math.round(line.latest)} ms` : t("noLatency");
+      return `<div class="line-row"><div class="line-row-head"><span class="line-row-name">${escapeHtml(line.name || line.id)}</span><span class="line-row-value">${escapeHtml(latest)}</span><span class="line-row-loss${loss > 0 ? " is-warm" : ""}">${escapeHtml(`${loss.toFixed(1)}%`)}</span></div>${bars ? `<div class="line-spark">${bars}</div>` : ""}</div>`;
+    })
+    .join("");
+  return `<section class="drawer-section"><div class="drawer-section-heading"><h3>${escapeHtml(t("threeNetLatency"))}</h3><span class="connection-pill">${escapeHtml(t("lossRate"))}</span></div>${rows}</section>`;
+}
+
 function renderHardware(node, status) {
   const connectionTotal = finiteNumber(status.connections);
   const udp = finiteNumber(status.connections_udp);
@@ -2540,7 +2629,8 @@ function renderHardware(node, status) {
     [t("os"), node.os], [t("kernel"), node.kernel_version], [t("architecture"), node.arch], [t("virtualization"), node.virtualization],
     [t("cpuName"), node.cpu_name], [t("cpuCores"), node.cpu_cores], [t("gpu"), node.gpu_name], [t("load"), `${finiteNumber(status.load).toFixed(2)} / ${finiteNumber(status.load5).toFixed(2)} / ${finiteNumber(status.load15).toFixed(2)}`],
     [t("process"), status.process], [t("connections"), `TCP ${Math.round(tcp)} · UDP ${Math.round(udp)}`], [t("group"), node.group], [t("tags"), nodeTags(node).join(", ")],
-  ];
+    // CFSM 无数据源的字段（虚拟化、显卡、无标签）直接隐藏，不显示成"未知"
+  ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== "");
   if (node.ipv4) items.push([t("ipv4"), node.ipv4]);
   if (node.ipv6) items.push([t("ipv6"), node.ipv6]);
   return `<section class="drawer-section"><div class="drawer-section-heading"><h3>${escapeHtml(t("systemInformation"))}</h3><span class="connection-pill${status.online === true ? "" : " is-offline"}">${escapeHtml(status.online === true ? t("online") : t("offline"))}</span></div><div class="hardware-grid">${items.map(([label, value]) => `<div class="hardware-item"><div class="hardware-item-label">${escapeHtml(label)}</div><div class="hardware-item-value" title="${escapeHtml(value ?? t("unknown"))}">${escapeHtml(value ?? t("unknown"))}</div></div>`).join("")}</div></section>`;
@@ -2613,13 +2703,16 @@ async function loadTrafficHistory(force = false) {
 }
 
 async function openDrawer(uuid) {
-  if (!getNodeByUuid(uuid)) return;
+  if (typeof uuid !== "string" || !uuid) return;
   resetMobileNavVisibility();
   state.drawerUuid = uuid;
-  state.drawerLoading = !state.demoMode;
+  const node = getNodeByUuid(uuid);
+  state.drawerLoading = Boolean(node) && !state.demoMode;
   state.drawerRecords = null;
   renderApp();
   document.body.style.overflow = "hidden";
+  // 未找到（已删除/隐藏/链接有误）：保留抽屉显示"未找到"，不静默失败
+  if (!node) return;
   if (state.demoMode) {
     state.drawerRecords = demoHistory(uuid);
     state.drawerLoading = false;
@@ -3275,6 +3368,7 @@ document.addEventListener("pointermove", handleDrawerPointerMove, { passive: fal
 document.addEventListener("pointerup", handleDrawerPointerUp);
 document.addEventListener("pointercancel", handleDrawerPointerCancel);
 document.addEventListener("keydown", handleKeydown);
+document.addEventListener("error", handleFlagError, true);
 document.addEventListener("visibilitychange", handleVisibilityChange);
 document.addEventListener("focusin", scheduleMobileInputState);
 document.addEventListener("focusout", () => setTimeout(scheduleMobileInputState, 0));
