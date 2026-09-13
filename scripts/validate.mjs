@@ -1,95 +1,107 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-const manifestPath = resolve(root, "komari-theme.json");
-const distIndexPath = resolve(root, "dist", "index.html");
-const distAppPath = resolve(root, "dist", "assets", "app.js");
-const distRegionDataPath = resolve(root, "dist", "assets", "region-data.js");
-const distWorldDataPath = resolve(root, "dist", "assets", "world-data.js");
-const distCssPath = resolve(root, "dist", "assets", "styles.css");
-const previewPath = resolve(root, "preview.png");
-
-const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+const distDir = resolve(root, "dist");
 const errors = [];
 
-function localizedText(value) {
-  if (typeof value === "string") return value.trim().length > 0;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  return Object.values(value).some(entry => typeof entry === "string" && entry.trim().length > 0);
+const pkg = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+const version = pkg.version;
+if (typeof version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+  errors.push("package.json version must be a semantic version");
 }
 
-if (typeof manifest.name !== "string" || manifest.name.trim().length === 0) {
-  errors.push("name must be a non-empty string");
-}
-if (typeof manifest.short !== "string" || !/^[A-Za-z0-9_-]+$/.test(manifest.short) || manifest.short === "default") {
-  errors.push("short must use only letters, digits, underscores, or hyphens and must not be default");
-}
-if (typeof manifest.description !== "string") errors.push("description must be a string");
-if (typeof manifest.version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(manifest.version)) {
-  errors.push("version must be a semantic version");
-}
-if (!localizedText(manifest.author)) errors.push("author must contain a non-empty localized value");
-if (typeof manifest.url !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/.test(manifest.url)) {
-  errors.push("url must be an HTTPS GitHub repository URL");
-}
-if (manifest.preview !== "preview.png") errors.push("preview must be preview.png");
-if (manifest.configuration?.type !== "managed") errors.push("configuration.type must be managed");
-if (!Array.isArray(manifest.configuration?.data)) errors.push("configuration.data must be an array");
-
-const allowedTypes = new Set(["string", "number", "select", "switch", "title", "textbox", "richtext", "nodes", "pingtasks"]);
-const keys = new Set();
-for (const [index, item] of (manifest.configuration?.data || []).entries()) {
-  if (!item || typeof item !== "object" || Array.isArray(item)) {
-    errors.push(`configuration.data[${index}] must be an object`);
-    continue;
-  }
-  if (!allowedTypes.has(item.type)) errors.push(`configuration.data[${index}].type is not supported`);
-  if (item.type === "title") {
-    if (!localizedText(item.name)) errors.push(`configuration.data[${index}].name is required for title`);
-    continue;
-  }
-  if (typeof item.key !== "string" || item.key.length === 0) errors.push(`configuration.data[${index}].key is required`);
-  else if (keys.has(item.key)) errors.push(`configuration key is duplicated: ${item.key}`);
-  else keys.add(item.key);
-  if (!localizedText(item.name)) errors.push(`configuration.data[${index}].name is required`);
-  if (item.type === "select" && (typeof item.options !== "string" || item.options.length === 0)) {
-    errors.push(`configuration.data[${index}].options is required for select`);
+async function readIfExists(path, label) {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    errors.push(`required file is missing: ${label}`);
+    return "";
   }
 }
 
-for (const file of [distIndexPath, distAppPath, distRegionDataPath, distWorldDataPath, distCssPath, previewPath]) {
-  try { await access(file); } catch { errors.push(`required file is missing: ${file.slice(root.length + 1)}`); }
+async function assertAbsent(path, label) {
+  try {
+    await access(path);
+    errors.push(`${label} must not exist in this port`);
+  } catch {
+    // expected
+  }
 }
 
-let indexHtml = "";
-let appSource = "";
-let cssSource = "";
-let worldDataSource = "";
-try { indexHtml = await readFile(distIndexPath, "utf8"); } catch { /* reported above */ }
-try { appSource = await readFile(distAppPath, "utf8"); } catch { /* reported above */ }
-try { cssSource = await readFile(distCssPath, "utf8"); } catch { /* reported above */ }
-try { worldDataSource = await readFile(distWorldDataPath, "utf8"); } catch { /* reported above */ }
+// --- 产物结构：dist/ 根级只有 index.html 与 assets/，assets/ 只有 .js/.css 文件 ---
+const requiredDistFiles = [
+  "index.html",
+  "assets/app.js",
+  "assets/styles.css",
+  "assets/region-data.js",
+  "assets/world-data.js",
+];
+for (const relative of requiredDistFiles) {
+  try {
+    await access(resolve(distDir, relative));
+  } catch {
+    errors.push(`required file is missing: dist/${relative}`);
+  }
+}
 
-if (!indexHtml.includes("<title>Komari Monitor</title>")) errors.push("dist/index.html must contain the exact Komari title replacement token");
-if (!indexHtml.includes("A simple server monitor tool.")) errors.push("dist/index.html must contain the exact Komari description replacement token");
-if (!indexHtml.includes('src="/assets/app.js"')) errors.push("dist/index.html must load /assets/app.js");
+const allowedDistRoot = new Set(["index.html", "assets"]);
+try {
+  for (const entry of await readdir(distDir)) {
+    if (!allowedDistRoot.has(entry)) errors.push(`dist/ must only contain index.html and assets/: found dist/${entry}`);
+  }
+  for (const entry of await readdir(resolve(distDir, "assets"), { withFileTypes: true })) {
+    if (entry.isDirectory()) errors.push(`dist/assets/ must not contain directories: found dist/assets/${entry.name}/`);
+    else if (!/\.(?:js|css)$/.test(entry.name)) errors.push(`dist/assets/ contains an unexpected file: ${entry.name}`);
+  }
+} catch {
+  // missing dist/ is reported by the required-file loop above
+}
+
+// 上游市场/代理资源在本移植版必须保持删除状态
+await assertAbsent(resolve(root, "komari-theme.json"), "komari-theme.json");
+await assertAbsent(resolve(root, "preview.png"), "preview.png");
+await assertAbsent(resolve(root, "src", "favicon.svg"), "src/favicon.svg");
+await assertAbsent(resolve(root, "src", "assets", "flags"), "src/assets/flags");
+
+// --- 产物内容 ---
+const indexHtml = await readIfExists(resolve(distDir, "index.html"), "dist/index.html");
+const appSource = await readIfExists(resolve(distDir, "assets", "app.js"), "dist/assets/app.js");
+const cssSource = await readIfExists(resolve(distDir, "assets", "styles.css"), "dist/assets/styles.css");
+const worldDataSource = await readIfExists(resolve(distDir, "assets", "world-data.js"), "dist/assets/world-data.js");
+
+if (!indexHtml.includes("CF-Server-Monitor")) errors.push("dist/index.html must identify CF-Server-Monitor");
+if (!indexHtml.includes('src="/assets/app.js?v=' + version + '"')) {
+  errors.push(`dist/index.html must load /assets/app.js with the ?v=${version} cache-busting query`);
+}
+if (!indexHtml.includes('href="/assets/styles.css?v=' + version + '"')) {
+  errors.push(`dist/index.html must load /assets/styles.css with the ?v=${version} cache-busting query`);
+}
 if (!indexHtml.includes('id="globe-portal"')) errors.push("dist/index.html must provide #globe-portal");
-if (!indexHtml.includes('href="/assets/styles.css"')) errors.push("dist/index.html must load /assets/styles.css");
-if (!indexHtml.includes('viewport-fit=cover, interactive-widget=resizes-content')) {
+if (!indexHtml.includes("viewport-fit=cover, interactive-widget=resizes-content")) {
   errors.push("dist/index.html must keep the mobile safe-area and keyboard-aware viewport settings");
 }
 if (!indexHtml.includes('<meta name="format-detection" content="telephone=no"')) {
   errors.push("dist/index.html must disable automatic telephone-number detection");
 }
 if (/(?:src|href)=["']https?:\/\//i.test(indexHtml)) errors.push("dist/index.html must not load remote scripts or styles");
+if (indexHtml.includes("favicon.svg")) errors.push("dist/index.html must not reference favicon.svg");
+if (indexHtml.includes("__THEME_VERSION__")) errors.push("dist/index.html still contains an unreplaced version token");
 if (appSource.includes("__THEME_VERSION__")) errors.push("dist/assets/app.js still contains an unreplaced version token");
-if (!appSource.includes(`const THEME_VERSION = "${manifest.version}"`)) errors.push("dist/assets/app.js version does not match komari-theme.json");
+if (!appSource.includes(`const THEME_VERSION = "${version}"`)) {
+  errors.push("dist/assets/app.js version does not match package.json");
+}
 if (!appSource.includes('from "./region-data.js"')) errors.push("dist/assets/app.js must import the bundled region data");
 if (!appSource.includes('import("./world-data.js")')) errors.push("dist/assets/app.js must lazy-load the bundled world land data");
 if (appSource.includes("renderPerformancePanel")) errors.push("Top Performance panel implementation must not be present");
 if (appSource.includes("highPerformance")) errors.push("Redundant performance summary must not be present");
-if (worldDataSource.includes("export const REGION_COORDS")) errors.push("world-data.js must not duplicate REGION_COORDS from region-data.js");
+if (worldDataSource.includes("export const REGION_COORDS")) {
+  errors.push("world-data.js must not duplicate REGION_COORDS from region-data.js");
+}
+// 旗帜改由 CFSM 同源提供（/flags/<小写码>.svg），不得再引用主题内打包的旗帜
+for (const [label, source] of [["dist/assets/app.js", appSource], ["dist/assets/styles.css", cssSource]]) {
+  if (source.includes("/assets/flags/")) errors.push(`${label} must not reference the removed /assets/flags/ bundle`);
+}
 
 const requiredMobileAppTokens = [
   'const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";',
@@ -135,6 +147,5 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log(`Validated Komari Butterfly ${manifest.version}`);
-console.log(`Configuration keys: ${keys.size}`);
-console.log("Package contract: komari-theme.json + preview.png + dist/index.html");
+console.log(`Validated CFSM Butterfly ${version}`);
+console.log("Deploy contract: dist/index.html + dist/assets/*  (theme_url -> <commit-sha>/dist)");

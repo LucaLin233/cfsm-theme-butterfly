@@ -20,7 +20,7 @@ function loadWorldLandVectors() {
   return worldLandVectorsPromise;
 }
 
-const THEME_VERSION = "1.5.0";
+const THEME_VERSION = "0.1.0";
 const THEME_REPOSITORY = "https://github.com/TomorrowX6/Komari-Butterfly";
 const RPC_ENDPOINT = "/api/rpc2";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
@@ -955,7 +955,8 @@ function regionEmoji(code) {
 function regionFlag(region) {
   const code = regionCode(region);
   if (!code) return icon("globe", 14);
-  return `<img class="country-flag" src="/assets/flags/4x3/${code.toLowerCase()}.svg" alt="" loading="lazy" decoding="async"/>`;
+  // 旗帜改由 CFSM 同源提供（小写两位码）；主题不再打包 272 个 SVG。
+  return `<img class="country-flag" src="/flags/${code.toLowerCase()}.svg" alt="" loading="lazy" decoding="async"/>`;
 }
 
 function regionDisplayName(region) {

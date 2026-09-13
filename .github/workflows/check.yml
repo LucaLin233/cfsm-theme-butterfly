@@ -2,7 +2,7 @@ name: Check theme
 
 on:
   push:
-    branches: [main]
+    branches: [main, port]
   pull_request:
   workflow_dispatch:
 
@@ -21,7 +21,10 @@ jobs:
         run: npm run build
       - name: Validate
         run: npm run validate
-      - name: Verify package
+      - name: Verify dist is committed and up to date
         run: |
-          npm run package
-          unzip -l release/komari-butterfly-v*.zip
+          if [ -n "$(git status --porcelain dist)" ]; then
+            echo "::error::dist/ does not match src/ — run npm run build and commit dist/"
+            git status --porcelain dist
+            exit 1
+          fi

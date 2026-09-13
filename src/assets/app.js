@@ -955,7 +955,8 @@ function regionEmoji(code) {
 function regionFlag(region) {
   const code = regionCode(region);
   if (!code) return icon("globe", 14);
-  return `<img class="country-flag" src="/assets/flags/4x3/${code.toLowerCase()}.svg" alt="" loading="lazy" decoding="async"/>`;
+  // 旗帜改由 CFSM 同源提供（小写两位码）；主题不再打包 272 个 SVG。
+  return `<img class="country-flag" src="/flags/${code.toLowerCase()}.svg" alt="" loading="lazy" decoding="async"/>`;
 }
 
 function regionDisplayName(region) {

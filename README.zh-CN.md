@@ -1,10 +1,19 @@
 # Komari Butterfly
 
+> **CF-Server-Monitor 移植版（自用 fork，进行中）。** 本仓库 fork 自
+> [TomorrowX6/Komari-Butterfly](https://github.com/TomorrowX6/Komari-Butterfly)，正在移植到
+> [CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor) 的第三方主题位，仅自用。
+> 改动在 `port` 分支，`main` 保持上游原样作为基线。
+>
+> 下面上游说明对本 fork 已**过期**：`komari-theme.json`、`preview.png`、发布 ZIP、内置旗帜集与
+> Komari JSON-RPC 数据层已删除或正在替换。部署目标是 `theme_url` →
+> `https://github.com/LucaLin233/cfsm-theme-butterfly/tree/<commit-sha>/dist`；资源带
+> `?v=<package.json 版本号>` 查询串（CFSM 对主题资源下发 `immutable` 缓存），因此每次推送改动
+> 都要递增版本号。
+
 简体中文 · [English](README.md)
 
 一套参考 WinUI 3 与 Mica 材质设计的简约、响应式 Komari Monitor 主题。
-
-![Komari Butterfly 浅色预览](preview.png)
 
 手机端包含可展开搜索命令栏、支持下滑关闭的节点详情、带惯性旋转的全屏交互式地球、安全区与软键盘适配，以及根据滚动方向自动收起和恢复的底部导航。
 

@@ -1,10 +1,20 @@
 # Komari Butterfly
 
+> **CF-Server-Monitor port (self-hosted fork, work in progress).** This repository is a fork of
+> [TomorrowX6/Komari-Butterfly](https://github.com/TomorrowX6/Komari-Butterfly) being ported to
+> [CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor) as a private third-party
+> theme. Work happens on the `port` branch; `main` stays at the untouched upstream baseline.
+>
+> The upstream instructions below are **out of date for this fork**: `komari-theme.json`,
+> `preview.png`, the packaged release ZIP, the bundled flag set and the Komari JSON-RPC data layer
+> are removed or being replaced. Deploy target is `theme_url` →
+> `https://github.com/LucaLin233/cfsm-theme-butterfly/tree/<commit-sha>/dist`; assets carry a
+> `?v=<package.json version>` query because CF-Server-Monitor serves theme assets as
+> `immutable`, so the version must be bumped on every pushed change.
+
 [简体中文](README.zh-CN.md) · English
 
 A clean, responsive theme for [Komari Monitor](https://github.com/komari-monitor/komari), inspired by WinUI 3 and Mica materials.
-
-![Komari Butterfly light preview](preview.png)
 
 ## Highlights
 

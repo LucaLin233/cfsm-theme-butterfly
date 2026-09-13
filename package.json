@@ -1,11 +1,15 @@
 {
-  "name": "komari-butterfly",
+  "name": "cfsm-theme-butterfly",
   "private": true,
-  "description": "A WinUI 3 and Mica-inspired theme for Komari Monitor.",
+  "version": "0.1.0",
+  "description": "Komari-Butterfly (WinUI 3 / Mica style) ported to CF-Server-Monitor as a self-hosted third-party theme.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LucaLin233/cfsm-theme-butterfly.git"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "validate": "node scripts/validate.mjs",
-    "package": "node scripts/package.mjs",
     "check": "npm run build && npm run validate"
   },
   "engines": {
