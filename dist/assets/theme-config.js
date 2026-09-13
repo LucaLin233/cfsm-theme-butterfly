@@ -29,6 +29,8 @@ export const THEME_SETTINGS = Object.freeze([
     label: { "zh-CN": "信息密度", en: "Information density", ja: "情報密度" } },
   { section: "appearance", key: "corner_style", type: "select", options: ["soft", "rounded"], default: "soft",
     label: { "zh-CN": "圆角风格", en: "Corner style", ja: "角丸スタイル" } },
+  { section: "appearance", key: "language", type: "select", options: ["auto", "zh-CN", "en", "ja"], default: "auto",
+    label: { "zh-CN": "界面语言", en: "Interface language", ja: "表示言語" } },
   { section: "appearance", key: "background_image", type: "string", default: "",
     label: { "zh-CN": "自定义背景图 URL", en: "Custom background image URL", ja: "背景画像 URL" } },
   { section: "appearance", key: "background_opacity", type: "number", min: 0, max: 100, default: 16,

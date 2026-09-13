@@ -104,6 +104,7 @@ const STRINGS = {
     settingsSaveFailed: "保存失败",
     settingsReadFailed: "读取现有设置失败，已取消写入。",
     settingsReset: "恢复默认",
+    languageAuto: "跟随站点",
     remainingTraffic: "剩余流量",
     usedThisMonth: "当月已用",
     billing: "计费与流量",
@@ -288,6 +289,7 @@ const STRINGS = {
     settingsSaveFailed: "Save failed",
     settingsReadFailed: "Could not read the current settings, so nothing was written.",
     settingsReset: "Reset to defaults",
+    languageAuto: "Follow site",
     remainingTraffic: "Remaining",
     usedThisMonth: "Used this month",
     billing: "Billing & traffic",
@@ -472,6 +474,7 @@ const STRINGS = {
     settingsSaveFailed: "保存に失敗しました",
     settingsReadFailed: "現在の設定を読み取れなかったため、書き込みを中止しました。",
     settingsReset: "既定値に戻す",
+    languageAuto: "サイトに従う",
     remainingTraffic: "残り通信量",
     usedThisMonth: "今月の使用量",
     billing: "課金と通信量",
@@ -744,6 +747,8 @@ let mobileNavScrollFrame = null;
 let mobileInputStateFrame = null;
 let mobileStatusRenderTimer = null;
 let statusRefreshInFlight = false;
+// 输入法组字（composition）期间不能重渲染：整页重渲染会打断候选，导致中文/日文根本打不进去
+let searchComposing = false;
 let drawerDrag = null;
 let suppressDrawerHandleClickUntil = 0;
 
@@ -2844,7 +2849,21 @@ function applyHashRoute() {
 // ---------- 主题设置面板（16 项，落库键前缀 butterfly_）----------
 
 function settingOptionLabel(option) {
-  return ["system", "light", "dark"].includes(option) ? t(option) : option;
+  if (["system", "light", "dark"].includes(option)) return t(option);
+  if (option === "auto") return t("languageAuto");
+  if (option === "zh-CN") return "简体中文";
+  if (option === "ja") return "日本語";
+  if (option === "en") return "English";
+  return option;
+}
+
+// 界面语言：默认"跟随站点"（站点的 language cookie / 浏览器语言）；显式设置后以设置值为准
+function applyConfiguredLanguage() {
+  const configured = state.config.language;
+  if (!configured || configured === "auto") return;
+  if (configured === state.language) return;
+  state.language = configured;
+  document.documentElement.lang = configured;
 }
 
 function updateSettingDraft(key, rawValue) {
@@ -3284,6 +3303,23 @@ function handleGlobePortalClick(event) {
   }
 }
 
+const SEARCH_INPUT_SELECTOR = "#global-search, #mobile-search, #node-search";
+
+function scheduleSearchRender(inputId) {
+  const shouldOpenNodes = !["overview", "favorites"].includes(state.currentView);
+  if (shouldOpenNodes) state.currentView = "overview";
+  if (searchRenderFrame !== null) cancelAnimationFrame(searchRenderFrame);
+  searchRenderFrame = requestAnimationFrame(() => {
+    searchRenderFrame = null;
+    renderApp();
+    if (shouldOpenNodes) window.scrollTo({ top: 0 });
+    requestAnimationFrame(() => {
+      const target = document.querySelector(`#${inputId}`);
+      if (target) { target.focus(); target.setSelectionRange(target.value.length, target.value.length); }
+    });
+  });
+}
+
 function handleInput(event) {
   const setting = event.target.closest("[data-setting]");
   if (setting && setting.tagName !== "SELECT") {
@@ -3291,23 +3327,24 @@ function handleInput(event) {
     updateSettingDraft(setting.dataset.setting, event.target.value);
     return;
   }
-  if (event.target.matches("#global-search, #mobile-search, #node-search")) {
-    const inputId = event.target.id;
+  if (event.target.matches(SEARCH_INPUT_SELECTOR)) {
     state.query = event.target.value;
-    if (inputId === "mobile-search") state.mobileSearchOpen = true;
-    const shouldOpenNodes = !["overview", "favorites"].includes(state.currentView);
-    if (shouldOpenNodes) state.currentView = "overview";
-    if (searchRenderFrame !== null) cancelAnimationFrame(searchRenderFrame);
-    searchRenderFrame = requestAnimationFrame(() => {
-      searchRenderFrame = null;
-      renderApp();
-      if (shouldOpenNodes) window.scrollTo({ top: 0 });
-      requestAnimationFrame(() => {
-        const target = document.querySelector(`#${inputId}`);
-        if (target) { target.focus(); target.setSelectionRange(target.value.length, target.value.length); }
-      });
-    });
+    if (event.target.id === "mobile-search") state.mobileSearchOpen = true;
+    // 组字过程中只更新状态、不重渲染，等 compositionend 再渲染一次
+    if (event.isComposing || searchComposing) return;
+    scheduleSearchRender(event.target.id);
   }
+}
+
+function handleCompositionStart(event) {
+  if (event.target.matches(SEARCH_INPUT_SELECTOR)) searchComposing = true;
+}
+
+function handleCompositionEnd(event) {
+  if (!event.target.matches(SEARCH_INPUT_SELECTOR)) return;
+  searchComposing = false;
+  state.query = event.target.value;
+  scheduleSearchRender(event.target.id);
 }
 
 function handleChange(event) {
@@ -3317,10 +3354,20 @@ function handleChange(event) {
     return;
   }
   const setting = event.target.closest("[data-setting]");
-  if (setting) updateSettingDraft(setting.dataset.setting, setting.type === "checkbox" ? setting.checked : setting.value);
+  if (!setting) return;
+  const value = setting.type === "checkbox" ? setting.checked : setting.value;
+  updateSettingDraft(setting.dataset.setting, value);
+  // 语言改动立即生效（面板本身也要跟着换语言），其它设置在保存后生效
+  if (setting.dataset.setting === "language" && value && value !== "auto") {
+    state.language = value;
+    document.documentElement.lang = value;
+    renderApp();
+  }
 }
 
 function handleKeydown(event) {
+  // 组字过程中的 Enter/Escape 属于输入法，主题不要抢（keyCode 229 是旧浏览器的组字标记）
+  if (event.isComposing || event.keyCode === 229) return;
   if (event.key === "Enter" && event.target.matches("#mobile-search")) {
     event.target.blur();
     return;
@@ -3440,6 +3487,7 @@ async function loadSiteConfig() {
   state.version = { version: typeof config.version === "string" ? config.version : "unknown", hash: "" };
   state.config = mergeConfig(state.publicInfo.theme_settings);
   state.sort = state.config.default_sort;
+  applyConfiguredLanguage();
   applyAppearance();
   return config;
 }
@@ -3674,6 +3722,8 @@ function demoHistory(uuid) {
 app.addEventListener("click", handleClick);
 globePortal?.addEventListener("click", handleGlobePortalClick);
 app.addEventListener("input", handleInput);
+app.addEventListener("compositionstart", handleCompositionStart);
+app.addEventListener("compositionend", handleCompositionEnd);
 app.addEventListener("change", handleChange);
 app.addEventListener("pointerdown", handleDrawerPointerDown);
 document.addEventListener("pointermove", handleDrawerPointerMove, { passive: false });
