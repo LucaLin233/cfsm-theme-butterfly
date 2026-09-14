@@ -225,6 +225,7 @@ export function isReportStale(status, { now = Date.now(), staleAfterMs = 0 } = {
 
 // 连接状态机：idle → connecting → socket-open → subscription-pending → live；
 // 异常关闭按指数退避重连（1s → 30s，±20% 抖动），关闭码 1008（非法 scope/ids）为终止态。
+// `subscribeScope` 传 `null` 表示订阅消息不带 `scope`（沿用 URL 的 `subscribe`，用于单机订阅）。
 export function createRealtimeChannel({
   url,
   WebSocketCtor = typeof WebSocket === "undefined" ? null : WebSocket,
@@ -271,7 +272,12 @@ export function createRealtimeChannel({
 
   const sendSubscribe = () => {
     emit("subscription-pending");
-    send({ type: "subscribe", scope: subscribeScope, ids });
+    // `subscribeScope: null` = 订阅消息不带 `scope` 键：服务端 `_getSubscribeScope` 会沿用 URL 中的
+    // `subscribe`（单机模式即 subscribed=<serverId>），这正是 `subscribe=<serverId>` 模式要求的形态。
+    // 显式传 scope="all" 会把该连接改回全量过滤，ids 为空时一条推送都收不到。
+    const payload = { type: "subscribe", ids };
+    if (typeof subscribeScope === "string" && subscribeScope) payload.scope = subscribeScope;
+    send(payload);
     clearSubscribeTimer();
     subscribeTimer = setTimeoutImpl(() => {
       subscribeTimer = null;

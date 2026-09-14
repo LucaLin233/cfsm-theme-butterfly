@@ -7508,6 +7508,50 @@ svg {
   color: var(--red);
 }
 
+/* 深链单机作用域（detail）：列表未加载，只显示进度/错误与返回入口，不渲染首页任何视图 */
+.app-shell.detail-scope .app-main {
+  display: flex;
+  min-height: 100vh;
+}
+
+.app-shell.detail-scope .content-shell {
+  display: grid;
+  flex: 1;
+  padding: 24px;
+  place-items: center;
+}
+
+.detail-scope-card {
+  display: grid;
+  width: min(420px, 100%);
+  gap: 14px;
+  justify-items: center;
+  padding: 28px;
+  border-radius: var(--radius-md);
+  background: var(--surface-solid);
+  text-align: center;
+}
+
+.detail-scope-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: calc(11px * var(--text-scale));
+  line-height: 1.65;
+}
+
+.detail-scope-error {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+
+.detail-scope-error p {
+  margin: 0;
+  color: var(--amber);
+  font-size: calc(11px * var(--text-scale));
+  line-height: 1.65;
+}
+
 
 :root {
   /* 文字缩放系数：app.js 按「字体大小」设置写入；标准 = 1.25（原主题字号偏小） */

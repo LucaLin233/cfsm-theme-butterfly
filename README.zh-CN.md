@@ -13,9 +13,9 @@
 |---|---|---|
 | 数据层 | Komari JSON-RPC 2.0（`/api/rpc2`），9 处调用点 | REST：`GET /api/config`、`/api/servers`、`/api/server?id=`、`/api/history/all?id=&hours=`（`src/assets/cfsm-api.js`） |
 | 字段映射 | 原生 Komari 模型 | `src/assets/cfsm-map.js`（单位、流量方向、当月/全时累计、线路集合、剩余流量） |
-| 实时刷新 | 轮询 | 默认 **30 秒**轮询（设置内 15–300），页面不可见自动暂停，失败按 30→60→120 秒退避。不引入 WebSocket。 |
+| 实时刷新 | 轮询 | 一次 `/api/servers` 快照 + `/api/ws` WebSocket 增量推送（约 5 秒合并窗口）；WS 不可用/断开期间按 30→60→120 秒轮询兜底（设置内 15–300），页面不可见即断开连接，关闭码 1008 为终止态并长期降级轮询。 |
 | 设置 | `komari-theme.json` 清单 | 主题内设置面板 → `POST /api/theme_options`，键统一 `butterfly_` 前缀，写前必读-改-写 |
-| 深链接 | 无 | `#/` 与 `#/server/<id>`（抽屉 + 浏览器前进后退） |
+| 深链接 | 无 | `#/` 与 `#/server/<id>`（抽屉 + 浏览器前进后退）。深链直达时只请求 `/api/config` + `/api/server?id=` 并建立 `subscribe=<id>` 单机订阅，**不加载整表**；关闭抽屉才切回列表与 `subscribe=all`。 |
 | 旗帜 | 打包 272 个 SVG | 用 CFSM 同源 `/flags/<小写码>.svg` |
 | 市场打包 | `komari-theme.json`、`preview.png`、发布 ZIP | 已删除 |
 | 增补块 | 无 | IPv4/IPv6 徽标、剩余流量（含降级）、到期天数、价格与计费周期、全时出/入站累计 |

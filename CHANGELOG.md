@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.1 — 2026-09-14（CF-Server-Monitor 移植版）
+
+- **深链直达单机不再加载整表**：打开 `#/server/<id>` 时只请求 `/api/config` + `/api/server?id=`，
+  并建立 `subscribe=<serverId>` 单机 WebSocket 订阅；**全程不调用 `/api/servers`**（那一次约 230 KB）。
+- 关闭抽屉（或回首页）才停单机连接、取一次整表快照并重算 ids、切回 `subscribe=all` 连接。
+  整表快照失败时**保持单机作用域**并提示，绝不用单台数据渲染首页。
+- 新增集中渲染闸门 `dataScope`（`none` / `list` / `detail`）：`detail` 作用域下 `aggregateMetrics`、
+  `buildAlerts`、`buildTrafficSeries`、节点过滤与视图渲染**调用次数为 0**（列表未加载，
+  任何"总数/平均"都会是假数据）。`?debug=1` 时可用 `window.__cfsmRenderCounters` 验收。
+- 单机路径的降级通道同样是单机的：WS 不可用时轮询 `GET /api/server?id=`（约 1 KB），
+  不会退化成整表快照；手动刷新、可见性恢复、断线补数据都按作用域分发。
+- 详情态字段来源明确：三网窗口（`ping`/`loss` 数组）只有 `/api/servers` 返回，`/api/server` 不返回，
+  因此该路径只显示单值 ping/loss，拿到列表数据后才恢复迷你柱状窗口。
+- 404（不存在/不可见）、401（登录失效）、403（Turnstile 或来源限制）与网络失败各有独立提示；
+  路由中的 id 先做与订阅同源的字符集/长度校验，非法则提示且**不发请求**。
+- 修正单机订阅的协议形态：连接建立后发送**不带 `scope`** 的 `subscribe` 消息
+  （服务端在消息缺 `scope` 时沿用 URL 的 `subscribe`）。显式发 `scope:"all"` 且 ids 为空时，
+  服务端 `_shouldDeliver` 会把该连接判定为不推送任何服务器。
+- 测试：`test-realtime.mjs` 增至 23 项（新增单机订阅形态断言）、`test-modules.mjs` 增至 15 项
+  （新增 `/api/server` 单机映射、渲染闸门与 `getServers` 调用点断言）。
+
 ## 0.7.0 — 2026-09-14（CF-Server-Monitor 移植版）
 
 - **实时链路改为 WebSocket 推送**：新增 `assets/cfsm-realtime.js`（URL 构造、消息解析、ids 校验、

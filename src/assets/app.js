@@ -1,8 +1,8 @@
 import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=__THEME_VERSION__";
 import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking, readStoredToken } from "./cfsm-api.js?v=__THEME_VERSION__";
-import { buildWsUrl, createRealtimeChannel, extractSamples, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=__THEME_VERSION__";
+import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=__THEME_VERSION__";
 import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=__THEME_VERSION__";
-import { mapHistoryRows, mapServers } from "./cfsm-map.js?v=__THEME_VERSION__";
+import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=__THEME_VERSION__";
 
 const DEG_TO_RAD = Math.PI / 180;
 let worldLandVectorsPromise = null;
@@ -43,6 +43,13 @@ const TRAFFIC_SKIP_STALE = false;
 const TRAFFIC_STALE_STATE_MAX_MS = 10 * 60 * 1000;
 // 深链接路由：#/ 与 #/server/<id>（管理入口仍是站点自身的 /admin#admin）
 const HASH_SERVER_PREFIX = "#/server/";
+// 数据作用域。`detail` = 深链冷启动的单机详情：**列表从未加载**（`state.nodes` 为空），
+// 因此一切依赖列表的全局聚合在该作用域下都没有意义，必须被 renderApp 的集中闸门挡掉
+// （否则"一台机器"会被当成"全部机器"参与总数、平均与通知计算）。
+const DATA_SCOPE = Object.freeze({ none: "none", list: "list", detail: "detail" });
+// 渲染闸门探针（DRAFT-v3 §A6 的调用计数断言）：detail 作用域下这些全局辅助必须 0 次调用。
+// 计数器常驻（每次 +1 的开销可忽略），仅在 `?debug=1` 时挂到 window 供浏览器验收读取。
+const renderCounters = { aggregateMetrics: 0, buildAlerts: 0, buildTrafficSeries: 0, filteredNodes: 0, renderCurrentView: 0 };
 // 文字缩放（作用于 CSS 变量 --text-scale，见 styles.css 末尾）。
 // 档位值即系数；标准 = 1.25 是用户实测确认的基准，其它档位以它为基准等比排布。
 const TEXT_SCALE_OPTIONS = Object.freeze(["1.12", "1.25", "1.4", "1.55", "1.75"]);
@@ -197,6 +204,13 @@ const STRINGS = {
     tags: "标签",
     close: "关闭",
     loadingDetails: "正在读取节点记录…",
+    detailShellHint: "正在显示单台服务器详情；关闭抽屉后加载完整节点列表。",
+    detailLoadingList: "正在加载节点列表…",
+    detailBackToList: "查看全部节点",
+    detailNotFound: "未找到该服务器，可能已被删除或不可见。",
+    detailUnauthorized: "登录状态已失效，无法读取该服务器。",
+    detailForbidden: "请求被站点拒绝（403，可能启用了 Turnstile 或来源限制）。",
+    detailInvalidId: "链接中的服务器 ID 无效。",
     regionSummary: "区域概览",
     regionBack: "返回全部区域",
     regionOpen: "查看 {region} 节点",
@@ -389,6 +403,13 @@ const STRINGS = {
     tags: "Tags",
     close: "Close",
     loadingDetails: "Loading node records…",
+    detailShellHint: "Showing a single server. Close the drawer to load the full node list.",
+    detailLoadingList: "Loading the node list…",
+    detailBackToList: "View all nodes",
+    detailNotFound: "Server not found — it may have been deleted or hidden.",
+    detailUnauthorized: "Your session has expired, so this server cannot be read.",
+    detailForbidden: "The site rejected the request (403, possibly Turnstile or origin restrictions).",
+    detailInvalidId: "The server id in the link is invalid.",
     regionSummary: "Region summary",
     regionBack: "Back to all regions",
     regionOpen: "View nodes in {region}",
@@ -581,6 +602,13 @@ const STRINGS = {
     tags: "タグ",
     close: "閉じる",
     loadingDetails: "ノード履歴を読み込み中…",
+    detailShellHint: "1 台のサーバー詳細を表示中です。ドロワーを閉じるとノード一覧を読み込みます。",
+    detailLoadingList: "ノード一覧を読み込み中…",
+    detailBackToList: "すべてのノードを表示",
+    detailNotFound: "サーバーが見つかりません。削除または非表示の可能性があります。",
+    detailUnauthorized: "ログイン状態が無効のため、このサーバーを読み取れません。",
+    detailForbidden: "サイトに拒否されました（403：Turnstile またはオリジン制限の可能性）。",
+    detailInvalidId: "リンクのサーバー ID が無効です。",
     regionSummary: "リージョン概要",
     regionBack: "すべてのリージョンに戻る",
     regionOpen: "{region} のノードを表示",
@@ -780,6 +808,17 @@ const statusPoller = createPoller({
   onError: () => scheduleStatusRender(false),
 });
 
+// detail 作用域的兜底轮询：WS 不可用时只刷新**单机**（`GET /api/server?id=`，约 1 KB）。
+// 深链路径无论如何都不得退化成整表快照 —— 那正是这条路径要消除的消耗。
+const detailPoller = createPoller({
+  getIntervalSeconds: () => state.config.poll_interval,
+  onTick: async () => {
+    const result = await refreshDetailStatus();
+    if (!result.ok) throw new Error(result.error instanceof Error ? result.error.message : "detail refresh failed");
+  },
+  onError: () => scheduleStatusRender(false),
+});
+
 // —— 实时链路编排：单一 owner（generation 失效旧回调），WebSocket 优先、失败降级轮询 ——
 // 数据来源始终是 `/api/servers` 快照 + `/api/ws` 增量；两条通道不会同时驱动状态更新：
 // WS 进入 live 即停轮询，WS 异常期间轮询兜底，ws 终止态（1008）后不再重连。
@@ -793,7 +832,13 @@ const realtime = {
 };
 
 function hasNode(uuid) {
-  return state.nodes.some(node => node.uuid === uuid);
+  if (state.nodes.some(node => node.uuid === uuid)) return true;
+  return state.dataScope === DATA_SCOPE.detail && state.detailNode?.uuid === uuid;
+}
+
+// 订阅范围：list = `subscribe=all` + 可见节点 ids；detail = `subscribe=<单机 id>`（URL 决定 scope）。
+function detailId() {
+  return state.detailNode?.uuid || "";
 }
 
 // 订阅集合 = 可见节点（与列表一致）；服务端约束见 cfsm-realtime 的 normalizeIds。
@@ -814,8 +859,8 @@ function subscriptionIds() {
 // 报告级字段（三网延迟/丢包、磁盘、启动时间）过期窗口：max(3 × report_interval, 5 分钟)。
 // 过期只标记不删除 —— 实时样本不是完整报告，缺字段不能当作已清除。
 function reportStaleAfterMs() {
-  const intervals = state.nodes
-    .map(node => Number(node.cfsm?.reportInterval))
+  const intervals = [state.detailNode, ...state.nodes]
+    .map(node => Number(node?.cfsm?.reportInterval))
     .filter(value => Number.isFinite(value) && value > 0);
   const base = intervals.length ? Math.min(...intervals) : 60;
   return Math.max(3 * base * 1000, 5 * 60 * 1000);
@@ -873,14 +918,19 @@ function handleRealtimeState({ state: next, code, reason }) {
     // 断线后补一次快照，但必须节流：退避早期（1s/2s/4s）会连续失败，
     // 不加限制时每次失败都拉一份完整快照（约 230 KB），反而比轮询更费流量。
     if (next === "closed" && Date.now() - (state.lastUpdated || 0) > statusPollIntervalMs()) {
-      void statusPoller.refreshNow();
+      void activePoller().refreshNow();
     }
   }
 }
 
 function startFallbackPolling() {
   if (document.hidden) return;
-  statusPoller.start();
+  activePoller().start();
+}
+
+// 按当前作用域选兜底通道：detail 只轮询单机，list 走整表快照。
+function activePoller() {
+  return state.dataScope === DATA_SCOPE.detail ? detailPoller : statusPoller;
 }
 
 // 快照间隔（秒 → 毫秒），用于节流"断线后补快照"。
@@ -891,6 +941,7 @@ function statusPollIntervalMs() {
 
 function stopFallbackPolling() {
   statusPoller.stop();
+  detailPoller.stop();
 }
 
 // `frontend_ws_timeout_minutes`（/api/config）只累计可见时间；0 或非法值表示不超时。
@@ -955,9 +1006,22 @@ function startRealtime(reason = "init") {
     realtime.mode = "idle";
     return;
   }
-  const url = buildWsUrl(location.origin, { token: readStoredToken() });
+  const scope = state.dataScope === DATA_SCOPE.detail ? "detail" : "list";
+  const id = scope === "detail" ? detailId() : "";
+  if (scope === "detail" && !id) {
+    // 目标不存在（404）：没有可订阅的 id，REST 探测也拿不到内容 → 只留提示，不建连接。
+    realtime.mode = "fallback";
+    return;
+  }
+  const url = buildWsUrl(location.origin, {
+    subscribe: scope === "detail" ? id : DEFAULT_SUBSCRIBE_SCOPE,
+    token: readStoredToken(),
+  });
   const channel = createRealtimeChannel({
     url,
+    // 单机模式：scope 由 URL 的 `subscribe=<id>` 决定，订阅消息必须**不带 scope**
+    // （服务端 `_getSubscribeScope` 在消息缺 scope 时沿用 URL 值；显式 "all" 且 ids 为空会收不到推送）。
+    subscribeScope: scope === "detail" ? null : DEFAULT_SUBSCRIBE_SCOPE,
     onMessage: (message) => {
       if (generation !== realtime.generation) return; // 旧连接回调一律丢弃
       handleRealtimeMessage(message);
@@ -969,7 +1033,7 @@ function startRealtime(reason = "init") {
   });
   realtime.channel = channel;
   realtime.mode = "connecting";
-  channel.start(subscriptionIds());
+  channel.start(scope === "detail" ? [id] : subscriptionIds());
   startRealtimeTimeoutWatch();
   // 首帧到达前先保证有数据（WS 失败时轮询会继续，live 后由 handleRealtimeState 停掉）。
   startFallbackPolling();
@@ -1028,6 +1092,11 @@ const state = {
   drawerUuid: null,
   drawerRecords: null,
   drawerLoading: false,
+  // 深链单机作用域：detail 时列表未加载，节点与状态分别来自 detailNode / statuses[id]
+  dataScope: DATA_SCOPE.none,
+  detailNode: null,
+  detailError: null,
+  detailLeaving: false,
   globeOpen: false,
   globeSelectedRegion: null,
   mobileSearchOpen: false,
@@ -2048,7 +2117,10 @@ function nodeIsOnline(uuid) {
 }
 
 function getNodeByUuid(uuid) {
-  return state.nodes.find(node => node.uuid === uuid) || null;
+  const node = state.nodes.find(item => item.uuid === uuid) || null;
+  if (node) return node;
+  // detail 作用域：列表未加载，节点来自深链单机数据
+  return state.dataScope === DATA_SCOPE.detail && state.detailNode?.uuid === uuid ? state.detailNode : null;
 }
 
 function mergeConfig(themeSettings) {
@@ -2132,6 +2204,15 @@ function pushSample(uuid, value) {
 }
 
 function updateSamples() {
+  // detail 作用域没有列表：只推进单机采样，**不调用** aggregateMetrics（闸门要求 0 次调用）
+  if (state.dataScope === DATA_SCOPE.detail) {
+    const node = state.detailNode;
+    if (node) {
+      const status = nodeStatus(node.uuid);
+      pushSample(node.uuid, status ? status.cpu : 0);
+    }
+    return;
+  }
   for (const node of state.nodes) {
     const status = nodeStatus(node.uuid);
     pushSample(node.uuid, status ? status.cpu : 0);
@@ -2142,6 +2223,7 @@ function updateSamples() {
 }
 
 function aggregateMetrics() {
+  renderCounters.aggregateMetrics += 1;
   const statuses = state.nodes.map(node => nodeStatus(node.uuid)).filter(Boolean);
   const onlineStatuses = statuses.filter(status => status.online === true);
   const online = state.nodes.filter(node => nodeIsOnline(node.uuid)).length;
@@ -2258,6 +2340,30 @@ function renderFatalError() {
   </section></main>`;
 }
 
+// detail 作用域的骨架：列表未加载，只显示进度/错误与抽屉入口 —— 不渲染首页任何视图。
+function renderDetailShell() {
+  if (mobileStatusRenderTimer !== null) {
+    clearTimeout(mobileStatusRenderTimer);
+    mobileStatusRenderTimer = null;
+  }
+  const continuity = captureRenderContinuity();
+  const open = Boolean(state.drawerUuid);
+  const body = state.detailLeaving
+    ? `<div class="drawer-loading"><div><div class="drawer-loading-spinner"></div>${escapeHtml(t("detailLoadingList"))}</div></div>`
+    : state.detailError
+      ? `<div class="detail-scope-error" role="alert"><p>${escapeHtml(state.detailError.message)}</p><button class="secondary-button" type="button" data-action="leave-detail">${icon("refresh", 15)}${escapeHtml(t("retry"))}</button></div>`
+      : `<p class="detail-scope-hint">${escapeHtml(t("detailShellHint"))}</p>${open ? "" : `<button class="secondary-button" type="button" data-action="leave-detail">${escapeHtml(t("detailBackToList"))}</button>`}`;
+  app.innerHTML = `<div class="app-shell detail-scope${open ? " has-mobile-overlay" : ""}">
+    <main class="app-main"><div class="content-shell"><section class="detail-scope-card">${body}</section></div></main>
+    <div class="toast-stack" aria-live="polite"></div>
+    <div class="drawer-backdrop${open ? " is-open" : ""}" data-action="close-drawer"></div>
+    <aside class="node-drawer${open ? " is-open" : ""}" aria-label="${escapeHtml(t("nodeDetails"))}">${open ? renderDrawer() : ""}</aside>
+  </div>`;
+  restoreRenderContinuity(continuity);
+  requestAnimationFrame(updateMobileNavVisibility);
+  scheduleMobileInputState();
+}
+
 function captureRenderContinuity() {
   const activeElement = document.activeElement;
   const activeInput = activeElement instanceof HTMLInputElement ? activeElement : null;
@@ -2294,6 +2400,13 @@ function restoreRenderContinuity(snapshot) {
 }
 
 function renderApp() {
+  // 集中闸门（DRAFT-v3 §A6）：detail 作用域只渲染单机骨架 + 抽屉，**早于一切全局聚合**。
+  // 该作用域下列表从未加载，aggregateMetrics / buildAlerts / buildTrafficSeries / 过滤 / 通知
+  // 一次都不能执行 —— 否则单台机器的数字会被当作全站统计（`?debug=1` 可读 renderCounters 验收）。
+  if (state.dataScope === DATA_SCOPE.detail) {
+    renderDetailShell();
+    return;
+  }
   if (mobileStatusRenderTimer !== null) {
     clearTimeout(mobileStatusRenderTimer);
     mobileStatusRenderTimer = null;
@@ -2387,6 +2500,7 @@ function navItem(view, iconName, badge = null) {
 }
 
 function renderCurrentView(metrics) {
+  renderCounters.renderCurrentView += 1;
   if (state.currentView === "regions") return renderRegionsView(metrics);
   if (state.currentView === "traffic") return renderTrafficView(metrics);
   if (state.currentView === "favorites") return renderFavoritesView(metrics);
@@ -2533,6 +2647,7 @@ function sortOption(value, labelKey) {
 }
 
 function filteredNodes() {
+  renderCounters.filteredNodes += 1;
   const query = state.query.trim().toLocaleLowerCase(state.language);
   const activeFilter = state.currentView === "favorites" ? "favorites" : state.filter;
   const nodes = state.nodes.filter(node => {
@@ -2632,6 +2747,7 @@ function meter(label, value, color) {
 }
 
 function buildAlerts() {
+  renderCounters.buildAlerts += 1;
   const alerts = [];
   for (const node of state.nodes) {
     const status = nodeStatus(node.uuid);
@@ -2745,6 +2861,7 @@ function renderFavoritesView(metrics) {
 }
 
 function buildTrafficSeries() {
+  renderCounters.buildTrafficSeries += 1;
   const histories = state.nodes
     .map(node => state.trafficHistory.get(node.uuid) || [])
     .filter(records => records.length > 0);
@@ -3091,7 +3208,17 @@ function writeHash(hash) {
 function applyHashRoute() {
   const route = readHashRoute();
   if (route.view === "server") {
-    if (state.drawerUuid !== route.id) void openDrawer(route.id);
+    const id = routeIdIsValid(route.id);
+    if (!id) {
+      showToast(t("nodeDetails"), t("detailInvalidId"), "warning");
+      return;
+    }
+    if (state.dataScope === DATA_SCOPE.detail) {
+      // 已在单机作用域：同一目标幂等；换目标则重取单机数据（依旧不加载列表）
+      if (detailId() !== id) void enterDetailScope(id);
+      return;
+    }
+    if (state.drawerUuid !== id) void openDrawer(id);
     return;
   }
   if (route.view === "root" && state.drawerUuid) closeDrawer({ syncHash: false });
@@ -3322,6 +3449,13 @@ async function openDrawer(uuid) {
   state.drawerUuid = uuid;
   // 同步地址栏（深链接 #/server/<id>）；applyHashRoute 幂等，重复触发不会递归
   writeHash(`${HASH_SERVER_PREFIX}${encodeURIComponent(uuid)}`);
+  await loadDrawerRecords(uuid);
+}
+
+// 抽屉数据：详情只取该机器 1 小时历史（单机约 30 KB）；失败时回落到流量视图的缓存。
+// 三网窗口（ping/loss 数组）只存在于 `/api/servers`，此处不重复拉全量列表，直接复用
+// 列表缓存里的 `node.cfsm.latencyWindow`（detail 作用域下为空 → 只显示单值 ping/loss）。
+async function loadDrawerRecords(uuid) {
   const node = getNodeByUuid(uuid);
   state.drawerLoading = Boolean(node) && !state.demoMode;
   state.drawerRecords = null;
@@ -3333,13 +3467,9 @@ async function openDrawer(uuid) {
     state.drawerRecords = demoHistory(uuid);
     state.drawerLoading = false;
     renderApp();
-    document.body.style.overflow = "hidden";
     return;
   }
   try {
-    // 详情只取该机器 1 小时历史（单机约 30 KB）；失败时回落到流量视图的缓存。
-    // 三网窗口（ping/loss 数组）只存在于 `/api/servers`，此处不重复拉全量列表，
-    // 直接复用列表缓存里的 `node.cfsm.latencyWindow`。
     const rows = await api.getHistory(uuid, 1, { timeout: 15000 });
     state.drawerRecords = mapHistoryRows(rows, {
       node: getNodeByUuid(uuid),
@@ -3358,8 +3488,128 @@ async function openDrawer(uuid) {
   }
 }
 
+// ---------- 深链单机作用域（detail）----------
+// 冷启动直达 `#/server/<id>`：只取 `/api/config` + `/api/server?id=`，**不调用** `/api/servers`，
+// 并建立 `subscribe=<id>` 单机订阅；关闭抽屉时才拉一次整表快照并切回 all 连接。
+
+// 路由 id 与订阅 id 用同一套校验（长度 1–64、字符集 [A-Za-z0-9._:-]）：非法则提示且不发请求。
+function routeIdIsValid(id) {
+  const normalized = normalizeIds([id]);
+  return normalized.ok && normalized.ids.length === 1 ? normalized.ids[0] : "";
+}
+
+// 404/401/403 与网络失败各有独立提示，不静默失败
+function classifyDetailError(error) {
+  const status = Number(error?.status) || 0;
+  if (status === 404) return { code: "notFound", message: t("detailNotFound") };
+  if (status === 401) return { code: "unauthorized", message: t("detailUnauthorized") };
+  if (status === 403) return { code: "forbidden", message: t("detailForbidden") };
+  return { code: "network", message: (error instanceof Error && error.message) || t("offlineData") };
+}
+
+// `GET /api/server?id=` → detailNode + statuses[id]。`window: null`：该接口不返回三网窗口数组。
+function applyDetailPayload(raw) {
+  const node = mapNode(raw);
+  if (!node) throw new Error(t("nodeNotFound"));
+  node.cfsm.latencyWindow = [];
+  node.cfsm.latencyWindowPoints = Number(state.cfsmConfig?.latency_window?.points) || null;
+  node.cfsm.latencyWindowHours = Number(state.cfsmConfig?.latency_window?.hours) || null;
+  state.detailNode = node;
+  const status = mapStatus(raw, { sources: lineSources(), window: null, now: Date.now() });
+  if (status) state.statuses[node.uuid] = status;
+  state.connected = true;
+  state.lastUpdated = Date.now();
+  updateSamples();
+  return node;
+}
+
+// detail 的单机刷新：`GET /api/server?id=`（约 1 KB），**绝不**退化成整表快照。
+async function refreshDetailStatus() {
+  const id = detailId();
+  if (!id) return { ok: false, error: new Error(t("nodeNotFound")) };
+  try {
+    applyDetailPayload(await api.getServer(id, { timeout: 15000 }));
+    scheduleStatusRender(false);
+    return { ok: true, error: null };
+  } catch (error) {
+    state.connected = false;
+    scheduleStatusRender(false);
+    return { ok: false, error };
+  }
+}
+
+async function enterDetailScope(uuid) {
+  state.dataScope = DATA_SCOPE.detail;
+  state.detailNode = null;
+  state.detailError = null;
+  state.detailLeaving = false;
+  state.drawerUuid = uuid;
+  state.drawerRecords = null;
+  state.drawerLoading = true;
+  state.nodes = [];
+  state.statuses = {};
+  document.body.style.overflow = "hidden";
+  renderApp();
+  try {
+    applyDetailPayload(await api.getServer(uuid, { timeout: 20000 }));
+    state.drawerLoading = false;
+    renderApp();
+  } catch (error) {
+    state.detailError = classifyDetailError(error);
+    state.drawerLoading = false;
+    renderApp();
+    showToast(t("nodeDetails"), state.detailError.message, "warning");
+    // 目标不可用：停掉上一个目标的单机连接，不再重连（没有可订阅的 id）
+    stopRealtimeChannel();
+    stopFallbackPolling();
+    realtime.mode = "fallback";
+    return;
+  }
+  // 单机连接必须跟随目标：detail → detail 切换时旧连接订阅的是上一个 id
+  startRealtime("detail-enter");
+  await loadDrawerRecords(uuid);
+}
+
+// 关闭抽屉 / 回首页：先停单机连接，再拉一次整表快照并重建 all 连接。
+// 失败时**保持 detail 作用域**并提示 —— 绝不用单机数据渲染首页（避免"一台机器当成全部"）。
+async function leaveDetailScope() {
+  if (state.detailLeaving) return;
+  const uuid = detailId();
+  state.detailLeaving = true;
+  state.drawerUuid = null;
+  state.drawerRecords = null;
+  state.drawerLoading = false;
+  document.body.style.overflow = "";
+  resetMobileNavVisibility();
+  stopRealtimeChannel();
+  stopFallbackPolling();
+  renderApp();
+  try {
+    applyServersPayload(await api.getServers({ timeout: 20000 }));
+    state.dataScope = DATA_SCOPE.list;
+    state.detailNode = null;
+    state.detailError = null;
+    state.detailLeaving = false;
+    renderApp();
+    startRealtime("detail-exit");
+  } catch (error) {
+    // 列表拉取失败：停在单机骨架（抽屉保持关闭，尊重用户意图），恢复单机连接继续供数
+    state.detailError = classifyDetailError(error);
+    state.detailLeaving = false;
+    renderApp();
+    showToast(t("disconnected"), state.detailError.message, "warning");
+    if (uuid) startRealtime("detail-exit-failed");
+  }
+}
+
 function closeDrawer({ syncHash = true } = {}) {
   const hadDrawer = Boolean(state.drawerUuid);
+  // detail 作用域：关抽屉 = 离开单机路径（停单机连接 → 快照 → 切回 all）
+  if (state.dataScope === DATA_SCOPE.detail) {
+    if (syncHash) writeHash("#/");
+    void leaveDetailScope();
+    return;
+  }
   state.drawerUuid = null;
   state.drawerRecords = null;
   state.drawerLoading = false;
@@ -3578,6 +3828,9 @@ function handleClick(event) {
   } else if (action === "close-drawer") {
     if (actionElement.matches(".drawer-handle") && Date.now() < suppressDrawerHandleClickUntil) return;
     closeDrawer();
+  } else if (action === "leave-detail") {
+    // 深链单机骨架的"查看全部节点"/失败重试：停单机连接 → 拉列表 → 切回 list
+    void leaveDetailScope();
   } else if (action === "clear-filters") {
     state.filter = "all";
     state.query = "";
@@ -3829,17 +4082,24 @@ function applyServersPayload(payload) {
   return mapped;
 }
 
-async function loadLiveData() {
-  await loadSiteConfig();
+// 列表路径：`/api/config`（已加载）+ `/api/servers` 整表快照。
+async function loadListData() {
   applyServersPayload(await api.getServers({ timeout: 20000 }));
-  // CFSM 没有 `/api/me`：本地有 jwt_token 即视为已登录（可看隐藏机器、可查 >24h 历史）。
-  state.userInfo = { logged_in: hasStoredToken(), username: "" };
+  state.dataScope = DATA_SCOPE.list;
 }
 
 async function refreshStatuses(manual = false) {
   if (statusRefreshInFlight) return;
   statusRefreshInFlight = true;
   try {
+    if (state.dataScope === DATA_SCOPE.detail) {
+      const result = await refreshDetailStatus();
+      if (manual) {
+        if (result.ok) showToast(t("realtimeMonitoring"), t("updatedNow"), "success");
+        else showToast(t("disconnected"), result.error instanceof Error ? result.error.message : t("offlineData"), "warning");
+      }
+      return;
+    }
     if (state.demoMode) {
       mutateDemoStatuses();
       state.connected = true;
@@ -3911,14 +4171,35 @@ async function initialize() {
   renderLoading();
   applyAppearance();
   try {
-    if (state.demoMode) loadDemoData();
-    else await loadLiveData();
+    const wantGlobe = new URLSearchParams(location.search).get("globe") === "1";
+    if (state.demoMode) {
+      loadDemoData();
+      state.dataScope = DATA_SCOPE.list;
+    } else {
+      await loadSiteConfig();
+      // CFSM 没有 `/api/me`：本地有 jwt_token 即视为已登录（可看隐藏机器、可查 >24h 历史）。
+      state.userInfo = { logged_in: hasStoredToken(), username: "" };
+      // 深链冷启动 `#/server/<id>`：单机 REST + 单服订阅，**不调用** `/api/servers`
+      const route = readHashRoute();
+      const deepLinkId = route.view === "server" ? routeIdIsValid(route.id) : "";
+      if (deepLinkId) {
+        // startTimers 会重置兜底轮询，必须在单机作用域建连之前调用
+        startTimers();
+        await enterDetailScope(deepLinkId);
+        state.loading = false;
+        renderApp();
+        if (wantGlobe) openGlobe();
+        return;
+      }
+      await loadListData();
+    }
     state.loading = false;
     renderApp();
+    // 深链接：列表已加载时按 #/server/<id> 打开详情抽屉（非法 id 的提示由 applyHashRoute 统一给出，
+    // 必须晚于首次渲染 —— renderApp 会重建 .toast-stack，渲染前弹的提示会被丢掉）
     if (state.currentView === "traffic") void loadTrafficHistory();
-    // 深链接：首次进入按 #/server/<id> 打开详情抽屉
     applyHashRoute();
-    if (new URLSearchParams(location.search).get("globe") === "1") openGlobe();
+    if (wantGlobe) openGlobe();
     startTimers();
     startRealtime("init");
   } catch (error) {
@@ -4091,4 +4372,6 @@ window.visualViewport?.addEventListener("resize", scheduleMobileInputState, { pa
 window.visualViewport?.addEventListener("scroll", scheduleMobileInputState, { passive: true });
 
 updateMobileInputState();
+// `?debug=1` 时暴露渲染闸门探针（浏览器验收读 detail 作用域下的调用次数，见 renderCounters）
+if (new URLSearchParams(location.search).get("debug") === "1") window.__cfsmRenderCounters = renderCounters;
 initialize();

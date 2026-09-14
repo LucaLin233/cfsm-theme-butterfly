@@ -13,9 +13,9 @@ third-party theme**. This is not a marketplace release; it is maintained for one
 |---|---|---|
 | Data layer | Komari JSON-RPC 2.0 (`/api/rpc2`), 9 call sites | REST: `GET /api/config`, `/api/servers`, `/api/server?id=`, `/api/history/all?id=&hours=` (`src/assets/cfsm-api.js`) |
 | Field mapping | native Komari model | `src/assets/cfsm-map.js` (units, traffic direction, monthly/all-time totals, line set, remaining traffic) |
-| Live updates | polling | polling every **30 s** by default (15–300 in settings), paused while the tab is hidden, with 30→60→120 s backoff on failures. No WebSocket. |
+| Live updates | polling | one `/api/servers` snapshot + `/api/ws` WebSocket deltas (~5 s coalescing window); falls back to 30→60→120 s polling (15–300 in settings) while the socket is down or refused, disconnects while the tab is hidden, and treat close code 1008 as terminal (polling from then on). |
 | Settings | `komari-theme.json` manifest | in-theme panel → `POST /api/theme_options`, keys prefixed `butterfly_`, always read-modify-write |
-| Deep links | — | `#/` and `#/server/<id>` (drawer + browser back/forward) |
+| Deep links | — | `#/` and `#/server/<id>` (drawer + browser back/forward). A cold deep link fetches only `/api/config` + `/api/server?id=` and opens a `subscribe=<id>` single-server socket — never the full list; closing the drawer switches back to the list and `subscribe=all`. |
 | Flags | 272 bundled SVGs | same-origin `/flags/<lowercase>.svg` provided by CFSM |
 | Market packaging | `komari-theme.json`, `preview.png`, release ZIP | removed |
 | Added blocks | — | IPv4/IPv6 badges, remaining traffic (with degraded mode), expiry countdown, price & billing cycle, all-time inbound/outbound totals |

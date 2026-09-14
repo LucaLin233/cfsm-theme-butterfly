@@ -4,7 +4,7 @@
 // 不碰 DOM 与全局状态；编排（何时建连、何时降级轮询）在 app.js。
 // 依据：官方 `theme-develop.md` 与 `API.md`（v2.8.5）——`subscribe=all` 默认不推送，
 // 必须显式发送 `{type:"subscribe", scope:"all", ids}`；非法 scope/ids 以关闭码 1008 断开。
-import { mapStatus } from "./cfsm-map.js?v=0.7.0";
+import { mapStatus } from "./cfsm-map.js?v=0.7.1";
 
 // 服务端约束（API.md）：ids ≤ 500 个，单个 id 长度 1–64，字符集 [A-Za-z0-9._:-]。
 export const REALTIME_LIMITS = Object.freeze({
@@ -225,6 +225,7 @@ export function isReportStale(status, { now = Date.now(), staleAfterMs = 0 } = {
 
 // 连接状态机：idle → connecting → socket-open → subscription-pending → live；
 // 异常关闭按指数退避重连（1s → 30s，±20% 抖动），关闭码 1008（非法 scope/ids）为终止态。
+// `subscribeScope` 传 `null` 表示订阅消息不带 `scope`（沿用 URL 的 `subscribe`，用于单机订阅）。
 export function createRealtimeChannel({
   url,
   WebSocketCtor = typeof WebSocket === "undefined" ? null : WebSocket,
@@ -271,7 +272,12 @@ export function createRealtimeChannel({
 
   const sendSubscribe = () => {
     emit("subscription-pending");
-    send({ type: "subscribe", scope: subscribeScope, ids });
+    // `subscribeScope: null` = 订阅消息不带 `scope` 键：服务端 `_getSubscribeScope` 会沿用 URL 中的
+    // `subscribe`（单机模式即 subscribed=<serverId>），这正是 `subscribe=<serverId>` 模式要求的形态。
+    // 显式传 scope="all" 会把该连接改回全量过滤，ids 为空时一条推送都收不到。
+    const payload = { type: "subscribe", ids };
+    if (typeof subscribeScope === "string" && subscribeScope) payload.scope = subscribeScope;
+    send(payload);
     clearSubscribeTimer();
     subscribeTimer = setTimeoutImpl(() => {
       subscribeTimer = null;

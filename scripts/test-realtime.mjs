@@ -323,6 +323,40 @@ await checkAsync("stop 幂等且之后不再回调", async () => {
   assert.equal(channel.state, "idle");
 });
 
+// --- 单机订阅形态（深链 detail scope）---
+
+check("buildWsUrl 单机订阅：subscribe=<serverId>", () => {
+  const url = new URL(buildWsUrl("https://probe.example.com", { subscribe: "9b2c4d3e-1a2b-4c5d-9e8f-7a6b5c4d3e2f" }));
+  assert.equal(url.pathname, "/api/ws");
+  assert.equal(url.searchParams.get("subscribe"), "9b2c4d3e-1a2b-4c5d-9e8f-7a6b5c4d3e2f");
+});
+
+await checkAsync("subscribeScope=null 时订阅消息不带 scope 键（沿用 URL 的 subscribe）", async () => {
+  const timers = createFakeTimers();
+  const sockets = createFakeWebSocket();
+  const channel = createChannel({ timers, sockets, subscribeScope: null });
+  channel.start(["srv-1"]);
+  const socket = sockets.instances.at(-1);
+  socket.open();
+  assert.equal(socket.sent.length, 1);
+  const payload = JSON.parse(socket.sent[0]);
+  assert.equal(payload.type, "subscribe");
+  assert.deepEqual(payload.ids, ["srv-1"]);
+  // 带 scope 时服务端会把连接改回全量过滤（scope=all + 空 ids 收不到任何推送）
+  assert.equal(Object.hasOwn(payload, "scope"), false);
+  channel.stop();
+});
+
+await checkAsync("subscribeScope 默认仍显式发送 scope=all", async () => {
+  const timers = createFakeTimers();
+  const sockets = createFakeWebSocket();
+  const channel = createChannel({ timers, sockets });
+  channel.start(["srv-1"]);
+  sockets.instances.at(-1).open();
+  assert.equal(JSON.parse(sockets.instances.at(-1).sent[0]).scope, "all");
+  channel.stop();
+});
+
 // --- 结果 ---
 
 if (failures.length) {

@@ -112,6 +112,74 @@ check("流量历史缓存按档位隔离", () => {
   assert.match(appSource, /trafficHistoryLoadingByHours: new Set\(\)/);
 });
 
+// --- 深链单机作用域（detail）---
+
+check("/api/server 的单机响应可直接映射为 detailNode + status", () => {
+  const raw = {
+    id: "srv-1",
+    name: "HK-01",
+    region: "HK",
+    os: "Debian 13",
+    cpu: 12.34,
+    cpu_info: "AMD EPYC",
+    cpu_cores: 4,
+    ram_total: 8192,
+    ram_used: 3700,
+    swap_total: 2048,
+    swap_used: 100,
+    disk_total: 102400,
+    disk_used: 32000,
+    net_in_speed: 1024,
+    net_out_speed: 512,
+    tcp_conn: 32,
+    udp_conn: 4,
+    ping_ct: 23,
+    loss_ct: 0,
+    boot_time: "1700000000000",
+    last_updated: 1737638400000,
+    sort_order: 1,
+  };
+  const node = mapNode(raw);
+  assert.equal(node.uuid, "srv-1");
+  assert.equal(node.weight, 1);
+  // 详情接口不返回三网窗口数组 → window 传 null 时 buildPingMap 仍产出单值线路
+  const status = mapStatus(raw, { window: null, now: 1737638400000 });
+  assert.equal(status.online, true);
+  assert.ok(status.ping.ct, "单值 ping 线路应存在");
+  assert.equal(status.ping.ct.latest, 23);
+  assert.equal(status.net_in, 512, "net_in = 上传 ← net_out_speed");
+  assert.equal(status.net_out, 1024, "net_out = 下载 ← net_in_speed");
+});
+
+check("渲染闸门：detail 作用域在 renderApp 第一步分流（app.js）", () => {
+  // 闸门必须早于任何全局聚合，否则单台机器会被当作全站统计
+  assert.match(
+    appSource,
+    /function renderApp\(\)\s*\{[\s\S]{0,400}?if \(state\.dataScope === DATA_SCOPE\.detail\) \{\s*renderDetailShell\(\);\s*return;\s*\}/,
+  );
+  assert.match(appSource, /detailShellHint/);
+  assert.match(appSource, /class="app-shell detail-scope/);
+});
+
+check("深链冷启动只调用 getServer / getServers 的时机正确（app.js）", () => {
+  // 进入单机作用域只读单机接口
+  const enter = appSource.match(/async function enterDetailScope\(uuid\)[\s\S]*?\n\}/);
+  assert.ok(enter, "enterDetailScope 应存在");
+  assert.match(enter[0], /api\.getServer\(uuid/);
+  assert.doesNotMatch(enter[0], /api\.getServers\(/);
+  // 离开单机作用域才拉整表快照
+  const leave = appSource.match(/async function leaveDetailScope\(\)[\s\S]*?\n\}/);
+  assert.ok(leave, "leaveDetailScope 应存在");
+  assert.match(leave[0], /api\.getServers\(/);
+});
+
+check("单机作用域不新增整表轮询路径（app.js）", () => {
+  // 只有这三处允许出现 getServers：初始列表加载、离开单机作用域、列表模式刷新
+  const calls = appSource.match(/api\.getServers\(/g) || [];
+  assert.equal(calls.length, 3, `api.getServers 调用点应为 3 处，实际 ${calls.length}`);
+  assert.match(appSource, /function activePoller\(\) \{\s*return state\.dataScope === DATA_SCOPE\.detail \? detailPoller : statusPoller;/);
+});
+
 // --- 结果 ---
 
 if (failures.length) {
