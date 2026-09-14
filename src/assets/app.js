@@ -124,7 +124,7 @@ const STRINGS = {
     themeSettings: "主题设置",
     settingsDraftHint: "改动先在本地预览，点「保存设置」后写入站点。",
     settingsSignInHint: "未登录，只能查看。请先到 /admin#admin 登录后再保存。",
-    settingsTurnstileHint: "站点已开启 Turnstile，本移植版暂不支持保存设置，仅可查看。",
+    settingsTurnstileHint: "站点已开启全局 Turnstile：CFSM 要求所有 /api/* 请求携带校验头，本移植版未实现该凭证链，因此主题整体不可用（不只是设置面板只读）。",
     settingsSave: "保存设置",
     settingsSaving: "保存中…",
     settingsSaved: "设置已保存",
@@ -169,7 +169,10 @@ const STRINGS = {
     viewAll: "查看全部",
     noAlerts: "当前没有需要处理的提醒",
     realtimeMonitoring: "实时监控",
-    realtimeMonitoringCopy: "实时推送，断线自动降级轮询",
+    realtimeMonitoringCopy: "实时推送 · 约 5 秒合并窗口",
+    realtimeFallbackCopy: "已降级为按间隔刷新",
+    realtimeConnecting: "正在建立实时连接…",
+    drawerHistoryUnavailable: "历史记录加载失败，图表使用本地采样数据。",
     realtimeTimeoutPrompt: "实时连接已达到站点设定的时限。\n\n点「确定」重新连接，「取消」改为定时轮询。",
     globalCoverage: "全球覆盖",
     globalCoverageCopy: "{regions} 个区域 · {nodes} 个节点",
@@ -323,7 +326,7 @@ const STRINGS = {
     themeSettings: "Theme settings",
     settingsDraftHint: "Changes preview locally; click “Save settings” to write them to the site.",
     settingsSignInHint: "Read-only: you are not signed in. Sign in at /admin#admin to save.",
-    settingsTurnstileHint: "Turnstile is enabled on this site, so this port cannot save settings yet.",
+    settingsTurnstileHint: "This site enables global Turnstile, so CFSM requires every /api/* request to carry a verification header. This port does not implement that credential chain, so the theme is unusable (not merely read-only).",
     settingsSave: "Save settings",
     settingsSaving: "Saving…",
     settingsSaved: "Settings saved",
@@ -368,7 +371,10 @@ const STRINGS = {
     viewAll: "View all",
     noAlerts: "No alerts require attention",
     realtimeMonitoring: "Real-time monitoring",
-    realtimeMonitoringCopy: "Live push, automatic polling fallback",
+    realtimeMonitoringCopy: "Live push · ~5 s coalescing window",
+    realtimeFallbackCopy: "Fell back to interval polling",
+    realtimeConnecting: "Opening the live connection…",
+    drawerHistoryUnavailable: "History failed to load; charts fall back to local samples.",
     realtimeTimeoutPrompt: "The live connection reached the limit set by this site.\n\nOK reconnects, Cancel switches to periodic polling.",
     globalCoverage: "Global coverage",
     globalCoverageCopy: "{regions} regions · {nodes} nodes",
@@ -522,7 +528,7 @@ const STRINGS = {
     themeSettings: "テーマ設定",
     settingsDraftHint: "変更はこの画面でのみ反映されます。「設定を保存」でサイトに書き込みます。",
     settingsSignInHint: "未ログインのため閲覧のみです。保存するには /admin#admin でログインしてください。",
-    settingsTurnstileHint: "サイトで Turnstile が有効なため、この移植版では設定を保存できません。",
+    settingsTurnstileHint: "このサイトではグローバル Turnstile が有効です。CFSM はすべての /api/* に検証ヘッダーを要求しますが、本移植版はその資格情報チェーンを実装していないため、テーマは利用できません（設定パネルが読み取り専用というだけではありません）。",
     settingsSave: "設定を保存",
     settingsSaving: "保存中…",
     settingsSaved: "設定を保存しました",
@@ -567,7 +573,10 @@ const STRINGS = {
     viewAll: "すべて表示",
     noAlerts: "対応が必要な通知はありません",
     realtimeMonitoring: "リアルタイム監視",
-    realtimeMonitoringCopy: "リアルタイム配信、切断時はポーリングへ自動降格",
+    realtimeMonitoringCopy: "リアルタイム配信 · 約 5 秒の合流ウィンドウ",
+    realtimeFallbackCopy: "一定間隔のポーリングに降格しました",
+    realtimeConnecting: "リアルタイム接続を確立中…",
+    drawerHistoryUnavailable: "履歴の読み込みに失敗しました。グラフはローカルサンプルで表示しています。",
     realtimeTimeoutPrompt: "リアルタイム接続がサイト設定の上限に達しました。\n\nOK で再接続、キャンセルで定期ポーリングに切り替えます。",
     globalCoverage: "グローバルカバレッジ",
     globalCoverageCopy: "{regions} リージョン · {nodes} ノード",
@@ -910,17 +919,30 @@ function handleRealtimeState({ state: next, code, reason }) {
     realtime.mode = "fatal";
     console.warn("[CFSM Butterfly] realtime disabled", { code, reason });
     startFallbackPolling();
+    scheduleStatusRender(false);
     return;
   }
   if (next === "closed" || next === "connecting") {
-    // 重连期间保持轮询兜底，避免数据停更。
+    // 重连期间保持轮询兜底，避免数据停更；此时数据来自轮询 → 记为降级态（文案随之切换）
+    if (next === "closed") realtime.mode = "fallback";
     startFallbackPolling();
+    // 通道态文案需要跟着变（建连中 → 已降级）
+    scheduleStatusRender(false);
     // 断线后补一次快照，但必须节流：退避早期（1s/2s/4s）会连续失败，
     // 不加限制时每次失败都拉一份完整快照（约 230 KB），反而比轮询更费流量。
     if (next === "closed" && Date.now() - (state.lastUpdated || 0) > statusPollIntervalMs()) {
       void activePoller().refreshNow();
     }
   }
+}
+
+// 实时通道状态文案：live = 推送；fallback/fatal/用户拒绝 = 已降级；其余为建连中。
+// 状态变化会触发 scheduleStatusRender，因此这里的取值随渲染更新。
+function realtimeLabel() {
+  if (state.demoMode) return t("realtimeMonitoringCopy");
+  if (realtime.mode === "live") return t("realtimeMonitoringCopy");
+  if (realtime.mode === "fallback" || realtime.mode === "fatal" || realtime.optedOut) return t("realtimeFallbackCopy");
+  return t("realtimeConnecting");
 }
 
 function startFallbackPolling() {
@@ -1092,6 +1114,7 @@ const state = {
   drawerUuid: null,
   drawerRecords: null,
   drawerLoading: false,
+  drawerHistoryError: false,
   // 深链单机作用域：detail 时列表未加载，节点与状态分别来自 detailNode / statuses[id]
   dataScope: DATA_SCOPE.none,
   detailNode: null,
@@ -2540,7 +2563,7 @@ function renderStatusRibbon(metrics) {
 function renderHero(metrics, degraded) {
   return `<article class="hero-panel panel">
     <div class="hero-copy">
-      <div class="hero-eyebrow"><span class="hero-eyebrow-dot"></span>${escapeHtml(t("realtimeMonitoring"))}</div>
+      <div class="hero-eyebrow"><span class="hero-eyebrow-dot"></span>${escapeHtml(realtimeLabel())}</div>
       <h1 class="hero-title">${escapeHtml(state.config.hero_title || DEFAULT_CONFIG.hero_title)}</h1>
       <p class="hero-subtitle">${escapeHtml(state.config.hero_subtitle || DEFAULT_CONFIG.hero_subtitle)}</p>
       <button class="hero-button" type="button" data-action="open-globe">${escapeHtml(t("viewNodes"))}${icon("arrowRight", 15)}</button>
@@ -3052,7 +3075,7 @@ function renderDrawer() {
   const disk = percent(status.disk, status.disk_total || node.disk_total);
   return `<button class="drawer-handle" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}"><span></span></button><div class="drawer-scroll"><header class="drawer-header"><span class="drawer-node-flag">${regionFlag(node.region)}</span><div class="drawer-title"><h2>${escapeHtml(node.name || node.uuid)}</h2><p>${escapeHtml(nodeSubtitle(node))}</p></div><button class="icon-button drawer-close" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}">${icon("close")}</button></header>
     <div class="drawer-body"><div class="drawer-status-strip">${drawerStat(t("cpu"), formatPercent(status.cpu))}${drawerStat(t("memory"), formatPercent(memory))}${drawerStat(t("disk"), formatPercent(disk))}${drawerStat(t("averageLatency"), latency === null ? "—" : `${Math.round(latency)} ms`)}</div>
-      ${state.drawerLoading ? `<div class="drawer-loading"><div><div class="drawer-loading-spinner"></div>${escapeHtml(t("loadingDetails"))}</div></div>` : `${renderDrawerCharts(node, status)}${renderDrawerLines(node, status)}${renderBilling(node, status)}`}
+      ${state.drawerLoading ? `<div class="drawer-loading"><div><div class="drawer-loading-spinner"></div>${escapeHtml(t("loadingDetails"))}</div></div>` : `${state.drawerHistoryError ? `<p class="drawer-notice is-warning" role="status">${icon("warning", 14)}${escapeHtml(t("drawerHistoryUnavailable"))}</p>` : ""}${renderDrawerCharts(node, status)}${renderDrawerLines(node, status)}${renderBilling(node, status)}`}
       ${renderHardware(node, status)}
     </div></div>`;
 }
@@ -3363,7 +3386,8 @@ function isTrafficHistoryLoading(hours = state.trafficHours) {
 }
 
 // 「空窗口节点跳过」（默认关闭，见 TRAFFIC_SKIP_STALE）：只有状态新鲜、节点离线，
-// 且最后上报时间再加 1 小时余量仍早于窗口起点时，才认为该窗口内不可能存在记录。
+// 且最后上报时间再加安全余量仍早于窗口起点时，才认为该窗口内不可能存在记录。
+// 余量按 v4 §A2 取 `max(1 小时, 2 × report_interval)`：上报间隔较长的节点同样要留足余量。
 function shouldSkipTrafficHistory(node) {
   if (!TRAFFIC_SKIP_STALE) return false;
   const status = state.statuses[node.uuid];
@@ -3371,8 +3395,10 @@ function shouldSkipTrafficHistory(node) {
   if (!updated) return false;
   if (nodeIsOnline(node.uuid)) return false;
   if (!state.lastUpdated || Date.now() - state.lastUpdated > TRAFFIC_STALE_STATE_MAX_MS) return false;
+  const reportInterval = finiteNumber(node?.cfsm?.reportInterval, 0) * 1000;
+  const margin = Math.max(60 * 60 * 1000, 2 * reportInterval);
   const start = Date.now() - state.trafficHours * 3600 * 1000;
-  return updated + 60 * 60 * 1000 < start;
+  return updated + margin < start;
 }
 
 function setTrafficHours(hours) {
@@ -3459,6 +3485,7 @@ async function loadDrawerRecords(uuid) {
   const node = getNodeByUuid(uuid);
   state.drawerLoading = Boolean(node) && !state.demoMode;
   state.drawerRecords = null;
+  state.drawerHistoryError = false;
   renderApp();
   document.body.style.overflow = "hidden";
   // 未找到（已删除/隐藏/链接有误）：保留抽屉显示"未找到"，不静默失败
@@ -3478,6 +3505,8 @@ async function loadDrawerRecords(uuid) {
       now: Date.now(),
     });
   } catch {
+    // 历史失败不再静默：回落到流量视图缓存（可能为空），并在抽屉里给出独立提示
+    state.drawerHistoryError = true;
     state.drawerRecords = state.trafficHistory.get(uuid) || [];
   } finally {
     state.drawerLoading = false;
@@ -3545,6 +3574,7 @@ async function enterDetailScope(uuid) {
   state.detailLeaving = false;
   state.drawerUuid = uuid;
   state.drawerRecords = null;
+  state.drawerHistoryError = false;
   state.drawerLoading = true;
   state.nodes = [];
   state.statuses = {};

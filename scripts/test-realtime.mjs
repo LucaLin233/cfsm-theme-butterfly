@@ -117,11 +117,22 @@ check("buildWsUrl 使用页面协议并附带 subscribe", () => {
   assert.equal(url.searchParams.get("token"), null);
 });
 
-check("buildWsUrl 携带 token 与自定义 scope", () => {
-  const url = new URL(buildWsUrl("http://127.0.0.1:8899", { subscribe: "srv-1", token: "jwt-token" }));
-  assert.equal(url.protocol, "ws:");
-  assert.equal(url.searchParams.get("subscribe"), "srv-1");
-  assert.equal(url.searchParams.get("token"), "jwt-token");
+check("buildWsUrl 自定义 scope；同源不把 token 放进 URL", () => {
+  const original = globalThis.location;
+  globalThis.location = { origin: "https://probe.example.com", host: "probe.example.com" };
+  try {
+    // 同 host：凭据不进 URL（同源握手由浏览器带 cfsm_auth Cookie）
+    const same = new URL(buildWsUrl("https://probe.example.com", { subscribe: "srv-1", token: "jwt-token" }));
+    assert.equal(same.protocol, "wss:");
+    assert.equal(same.searchParams.get("subscribe"), "srv-1");
+    assert.equal(same.searchParams.get("token"), null);
+    // 跨 host：才附 token
+    const cross = new URL(buildWsUrl("https://edge.other.com", { subscribe: "srv-1", token: "jwt-token" }));
+    assert.equal(cross.searchParams.get("token"), "jwt-token");
+  } finally {
+    if (original === undefined) delete globalThis.location;
+    else globalThis.location = original;
+  }
 });
 
 // --- 消息解析 ---

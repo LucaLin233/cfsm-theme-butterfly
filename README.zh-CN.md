@@ -52,7 +52,9 @@ CF-Server-Monitor 对主题静态资源下发 `Cache-Control: public, max-age=31
   该接口**整对象替换**且**始终要求 `Authorization: Bearer <jwt>`**，所以面板在写之前会立即重读 `/api/config`，
   只合并自己的 `butterfly_*` 键；属于其它主题（例如 LuminaPlus）的键会被完整保留。
 - 未登录 → 面板只读，请先到 `/admin#admin` 登录。
-- 站点开启全局 Turnstile → 面板保持只读，因为本移植版不实现 `X-Turnstile-Token` / `X-Turnstile-Verified`。
+- 站点开启全局 Turnstile → **整套主题不可用**，不只是面板只读：CFSM 要求所有 `/api/*` 请求携带
+  `X-Turnstile-Token`（仅 `/api/config` 不带该头时、`/api/ws`、`/admin/api` 例外），而本移植版不实现该凭证链。
+  这是明确的非目标；仅在登录流程启用 Turnstile 的站点不受影响。
 - 编辑只改本地草稿，点「保存设置」才写站。
 
 ## 开发
@@ -74,7 +76,14 @@ npm run build    # src/ → dist/，注入版本号
   但**不参与**"最佳延迟"的计算（卡片胶囊、延迟分布、区域均值、抽屉统计、按延迟排序）。
 - CFSM 无数据源的字段：虚拟化类型、IPv4/IPv6 地址文本、显卡（本实例全空）、CPU 温度、Komari 的 `public_remark`。
   这些行直接隐藏，不显示成"未知"。
-- 流量视图逐台取 24 小时历史（12 台约 12 次请求、数百 KB），并节流为 5 分钟一次。
+- 流量视图逐台默认取 **6 小时**历史（面板内可切 24 小时），按档位缓存并节流为 5 分钟一次。
+- 实时链路 = 一次 `/api/servers` 快照 + `/api/ws` 增量推送。凭据只在 WebSocket 的 **host 与页面不同**时
+  才进 URL；同源连接依赖浏览器自动携带的 `cfsm_auth` Cookie。私有站点若 Cookie 缺失/过期而 localStorage
+  的 JWT 仍有效，WS 会因未授权失败并降级为按间隔轮询（功能不中断）。
+- **非目标**：不支持多个 `apiBase`、不支持跨域静态托管（规范允许该能力，本主题按同源单实例部署，明确不实现）。
+- 「空窗口节点跳过」优化默认**关闭**（`TRAFFIC_SKIP_STALE = false`）。启用需同时满足：状态时间戳为有限数、
+  本地状态在 10 分钟内更新过、节点非在线、最后上报时间 + `max(1 小时, 2 × 上报间隔)` 仍早于窗口起点；
+  且启用前必须对一台被判"可跳过"的节点手工请求同窗口 `/api/history/all` 确认返回空数组（随机抽 3 台全空）。
 - 上游的 `TW → CN` 旗帜特例未复刻。
 
 ## 许可

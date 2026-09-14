@@ -56,8 +56,10 @@ copy, labels in zh-CN, en, ja).
   panel reads `/api/config` immediately before writing and only merges its own `butterfly_*` keys.
   Keys that belong to other themes (for example LuminaPlus) are preserved.
 * Not signed in → the panel is read-only; sign in at `/admin#admin` first.
-* Global Turnstile enabled → the panel stays read-only, because this port does not implement
-  `X-Turnstile-Token` / `X-Turnstile-Verified`.
+* Global Turnstile enabled → **the whole theme is unusable**, not just a read-only panel: CFSM requires
+  `X-Turnstile-Token` on every `/api/*` request (only `/api/config` without that header, `/api/ws` and
+  `/admin/api` bypass it), and this port does not implement that credential chain. It is an explicit
+  non-goal; a site with only login-flow Turnstile is unaffected.
 * Changes apply locally while you edit; nothing is written until you press *Save settings*.
 
 ## Development
@@ -81,8 +83,20 @@ npm run build    # copies src/ → dist/ and injects the version token
   (card pill, latency histogram, region averages, drawer stat, latency sorting).
 * No data source in CFSM for: virtualization type, IPv4/IPv6 address text, GPU (all empty here),
   CPU temperature, Komari-style `public_remark`. Those rows are hidden instead of showing "unknown".
-* The traffic view fetches 24 h of history per node (12 nodes ≈ 12 requests, a few hundred KB) and
-  throttles to once per 5 minutes.
+* The traffic view fetches **6 h** of history per node by default (switchable to 24 h in the panel),
+  cached per range and throttled to once per 5 minutes.
+* The live link is one `/api/servers` snapshot plus `/api/ws` deltas. Credentials only go into the
+  socket URL when the socket **host differs from the page**; a same-origin socket relies on the
+  browser sending the `cfsm_auth` Cookie. On a private site whose Cookie is missing/expired while the
+  localStorage JWT is still valid, the socket fails authorization and the theme falls back to
+  interval polling (no functional loss).
+* **Non-goals**: multiple `apiBase` values and cross-origin static hosting. The spec allows them;
+  this port is a same-origin single-instance deployment and does not implement them.
+* The "skip empty-window nodes" optimisation is **off by default** (`TRAFFIC_SKIP_STALE = false`).
+  Enabling it requires all of: a finite status timestamp, local state refreshed within 10 minutes,
+  the node offline, and `lastReport + max(1 h, 2 × report_interval)` still earlier than the window
+  start — and, before switching it on, a manual `/api/history/all` for the same window on one
+  skipped node must return an empty array (3 random skipped nodes all empty).
 * The upstream `TW → CN` flag special case is not reproduced.
 
 ## License

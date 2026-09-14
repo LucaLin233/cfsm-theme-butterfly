@@ -4,7 +4,7 @@
 // 不碰 DOM 与全局状态；编排（何时建连、何时降级轮询）在 app.js。
 // 依据：官方 `theme-develop.md` 与 `API.md`（v2.8.5）——`subscribe=all` 默认不推送，
 // 必须显式发送 `{type:"subscribe", scope:"all", ids}`；非法 scope/ids 以关闭码 1008 断开。
-import { mapStatus } from "./cfsm-map.js?v=0.7.1";
+import { mapStatus } from "./cfsm-map.js?v=0.7.2";
 
 // 服务端约束（API.md）：ids ≤ 500 个，单个 id 长度 1–64，字符集 [A-Za-z0-9._:-]。
 export const REALTIME_LIMITS = Object.freeze({
@@ -100,14 +100,20 @@ export function normalizeIds(input) {
   };
 }
 
-// `/api/ws?subscribe=...`：同源走页面协议（https→wss）；私有站点另可用查询参数传 token。
-// 同源且存在 token 时也附带参数：`cfsm_auth` Cookie 是 HttpOnly，脚本无法判断它是否存在。
+// `/api/ws?subscribe=...`：同源走页面协议（https→wss）。
+// **凭据只在 host 不同时才进 URL**（与官方 API.md 示例一致）：
+// - 公开站点（`is_public === 'true'`）的 `/api/ws` 完全不校验身份，附 token 毫无收益；
+// - 私有站点同源握手由浏览器自动携带 `cfsm_auth` Cookie（HttpOnly 只阻止脚本读取，不阻止浏览器发送）；
+// - token 进入 URL 会随请求进入平台日志链路，把长期凭据放到不该出现的位置。
+// 代价（已知边界）：私有站点若 Cookie 缺失/过期但 localStorage JWT 仍有效，WS 得不到授权 →
+// 连接失败并走既有的降级轮询；改动前本身没有 WS，不构成回归。
 export function buildWsUrl(base, { subscribe = DEFAULT_SUBSCRIBE_SCOPE, token = "" } = {}) {
   const fallback = typeof location === "undefined" ? "http://localhost" : location.origin;
   const url = new URL("/api/ws", base || fallback);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   if (subscribe) url.searchParams.set("subscribe", subscribe);
-  if (token) url.searchParams.set("token", token);
+  const sameHost = typeof location === "undefined" || url.host === location.host;
+  if (token && !sameHost) url.searchParams.set("token", token);
   return url.toString();
 }
 
