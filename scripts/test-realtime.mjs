@@ -68,6 +68,7 @@ function createFakeTimers() {
     clearTimeout(id) { pending.delete(id); },
     runAll() { const entries = [...pending.entries()]; pending.clear(); for (const [, item] of entries) item.fn(); return entries.length; },
     get pendingCount() { return pending.size; },
+    get delays() { return [...pending.values()].map(item => item.ms); },
     get lastDelay() { return [...pending.values()].at(-1)?.ms ?? null; },
   };
 }
@@ -243,7 +244,8 @@ await checkAsync("连接进入 live：open → 订阅 → subscribed", async () 
   assert.equal(channel.state, "live");
   assert.equal(channel.isLive(), true);
   assert.equal(channel.attempt, 0);
-  assert.equal(timers.pendingCount, 0, "订阅确认后不应再有超时计时器");
+  // live 后仍应挂着的是"按需心跳"，订阅超时计时器必须已清除
+  assert.ok(!timers.delays.includes(8000), "订阅确认后不应再挂着订阅超时计时器");
 });
 
 await checkAsync("batchUpdate 透传给 onMessage，其他消息忽略", async () => {
@@ -365,6 +367,39 @@ await checkAsync("subscribeScope 默认仍显式发送 scope=all", async () => {
   channel.start(["srv-1"]);
   sockets.instances.at(-1).open();
   assert.equal(JSON.parse(sockets.instances.at(-1).sent[0]).scope, "all");
+  channel.stop();
+});
+
+// --- 按需心跳（A9）---
+
+await checkAsync("按需 ping：live 且长时间无消息时才发，收到消息即重置", async () => {
+  const timers = createFakeTimers();
+  const sockets = createFakeWebSocket();
+  const channel = createChannel({ timers, sockets, pingIdleMs: 5000 });
+  channel.start([]);
+  const socket = sockets.instances.at(-1);
+  socket.open();
+  socket.receive(JSON.stringify({ type: "subscribed", ts: 1 }));
+  assert.deepEqual(socket.sent.map(payload => JSON.parse(payload).type), ["subscribe"]);
+  // 静默到点 → 发一次 ping 并重新武装
+  timers.runAll();
+  assert.deepEqual(socket.sent.map(payload => JSON.parse(payload).type), ["subscribe", "ping"]);
+  // 收到任何消息都重置：计时器仍在挂起但不会累积
+  socket.receive(JSON.stringify({ type: "pong" }));
+  assert.equal(timers.pendingCount, 1);
+  channel.stop();
+  assert.equal(timers.pendingCount, 0, "stop 必须清掉心跳计时器");
+});
+
+await checkAsync("按需 ping 关闭时（pingIdleMs=0）不产生额外计时器", async () => {
+  const timers = createFakeTimers();
+  const sockets = createFakeWebSocket();
+  const channel = createChannel({ timers, sockets, pingIdleMs: 0 });
+  channel.start([]);
+  const socket = sockets.instances.at(-1);
+  socket.open();
+  socket.receive(JSON.stringify({ type: "subscribed", ts: 1 }));
+  assert.equal(timers.pendingCount, 0);
   channel.stop();
 });
 

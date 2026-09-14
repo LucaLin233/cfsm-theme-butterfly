@@ -1,6 +1,6 @@
 import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=__THEME_VERSION__";
 import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking, readStoredToken } from "./cfsm-api.js?v=__THEME_VERSION__";
-import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=__THEME_VERSION__";
+import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=__THEME_VERSION__";
 import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=__THEME_VERSION__";
 import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=__THEME_VERSION__";
 
@@ -47,6 +47,8 @@ const HASH_SERVER_PREFIX = "#/server/";
 // 因此一切依赖列表的全局聚合在该作用域下都没有意义，必须被 renderApp 的集中闸门挡掉
 // （否则"一台机器"会被当成"全部机器"参与总数、平均与通知计算）。
 const DATA_SCOPE = Object.freeze({ none: "none", list: "list", detail: "detail" });
+// 「WS 失败原因」REST 探测的最短间隔（毫秒）
+const PROBE_MIN_INTERVAL_MS = 30000;
 // 渲染闸门探针（DRAFT-v3 §A6 的调用计数断言）：detail 作用域下这些全局辅助必须 0 次调用。
 // 计数器常驻（每次 +1 的开销可忽略），仅在 `?debug=1` 时挂到 window 供浏览器验收读取。
 const renderCounters = { aggregateMetrics: 0, buildAlerts: 0, buildTrafficSeries: 0, filteredNodes: 0, renderCurrentView: 0 };
@@ -172,6 +174,7 @@ const STRINGS = {
     realtimeMonitoringCopy: "实时推送 · 约 5 秒合并窗口",
     realtimeFallbackCopy: "已降级为按间隔刷新",
     realtimeConnecting: "正在建立实时连接…",
+    realtimeProbeForbidden: "实时连接被站点拒绝（403，可能启用了 Turnstile 或来源限制），已降级为按间隔刷新。",
     drawerHistoryUnavailable: "历史记录加载失败，图表使用本地采样数据。",
     realtimeTimeoutPrompt: "实时连接已达到站点设定的时限。\n\n点「确定」重新连接，「取消」改为定时轮询。",
     globalCoverage: "全球覆盖",
@@ -374,6 +377,7 @@ const STRINGS = {
     realtimeMonitoringCopy: "Live push · ~5 s coalescing window",
     realtimeFallbackCopy: "Fell back to interval polling",
     realtimeConnecting: "Opening the live connection…",
+    realtimeProbeForbidden: "The site rejected the live connection (403, possibly Turnstile or origin restrictions); fell back to interval polling.",
     drawerHistoryUnavailable: "History failed to load; charts fall back to local samples.",
     realtimeTimeoutPrompt: "The live connection reached the limit set by this site.\n\nOK reconnects, Cancel switches to periodic polling.",
     globalCoverage: "Global coverage",
@@ -576,6 +580,7 @@ const STRINGS = {
     realtimeMonitoringCopy: "リアルタイム配信 · 約 5 秒の合流ウィンドウ",
     realtimeFallbackCopy: "一定間隔のポーリングに降格しました",
     realtimeConnecting: "リアルタイム接続を確立中…",
+    realtimeProbeForbidden: "サイトにリアルタイム接続を拒否されました（403：Turnstile またはオリジン制限の可能性）。一定間隔のポーリングに降格しました。",
     drawerHistoryUnavailable: "履歴の読み込みに失敗しました。グラフはローカルサンプルで表示しています。",
     realtimeTimeoutPrompt: "リアルタイム接続がサイト設定の上限に達しました。\n\nOK で再接続、キャンセルで定期ポーリングに切り替えます。",
     globalCoverage: "グローバルカバレッジ",
@@ -810,9 +815,10 @@ function handleAuthInvalidated() {
 const statusPoller = createPoller({
   getIntervalSeconds: () => state.config.poll_interval,
   onTick: async () => {
-    await refreshStatuses(false);
-    // refreshStatuses 内部已把失败写成 state.connected = false，这里抛出让 poller 退避。
-    if (!state.connected) throw new Error("status refresh failed");
+    // 成败由返回值判定，不再依赖共享的 state.connected（v2 §4.1 规则 3）
+    const result = await refreshStatuses({ reason: "poll" });
+    if (result.stale) return; // 代已失效：既不算成功也不算失败
+    if (!result.ok) throw new Error(result.error instanceof Error ? result.error.message : "status refresh failed");
   },
   onError: () => scheduleStatusRender(false),
 });
@@ -822,7 +828,8 @@ const statusPoller = createPoller({
 const detailPoller = createPoller({
   getIntervalSeconds: () => state.config.poll_interval,
   onTick: async () => {
-    const result = await refreshDetailStatus();
+    const result = await refreshStatuses({ reason: "detail-poll" });
+    if (result.stale) return;
     if (!result.ok) throw new Error(result.error instanceof Error ? result.error.message : "detail refresh failed");
   },
   onError: () => scheduleStatusRender(false),
@@ -838,6 +845,10 @@ const realtime = {
   visibleMs: 0,
   timeoutTimer: null,
   optedOut: false,
+  // 每代最多做一次「WS 失败原因」REST 探测（握手失败在浏览器里读不到 HTTP 状态码），
+  // 并设最短间隔，避免可见性事件连续换代时的探测风暴
+  probedGeneration: -1,
+  probedAt: 0,
 };
 
 function hasNode(uuid) {
@@ -873,6 +884,13 @@ function reportStaleAfterMs() {
     .filter(value => Number.isFinite(value) && value > 0);
   const base = intervals.length ? Math.min(...intervals) : 60;
   return Math.max(3 * base * 1000, 5 * 60 * 1000);
+}
+
+// 报告级字段（磁盘、三网延迟/丢包、进程/连接数、启动时间）只在周期性报告样本里出现。
+// 超过 staleAfter 未再出现即视为「未知」并按不可用展示，而不是继续显示上一轮的旧值；
+// 判定基于最近一次含报告级字段的样本时间（`cfsm_report_at`），快照数据没有该字段 → 视为新鲜。
+function statusReportStale(uuid) {
+  return isReportStale(nodeStatus(uuid), { staleAfterMs: reportStaleAfterMs() });
 }
 
 function applyRealtimeBatch(message) {
@@ -924,7 +942,11 @@ function handleRealtimeState({ state: next, code, reason }) {
   }
   if (next === "closed" || next === "connecting") {
     // 重连期间保持轮询兜底，避免数据停更；此时数据来自轮询 → 记为降级态（文案随之切换）
-    if (next === "closed") realtime.mode = "fallback";
+    if (next === "closed") {
+      realtime.mode = "fallback";
+      // 握手失败在浏览器里读不到 HTTP 状态码：用一次单机 REST 探测区分原因（每代一次）
+      void probeRealtimeFailure(realtime.generation);
+    }
     startFallbackPolling();
     // 通道态文案需要跟着变（建连中 → 已降级）
     scheduleStatusRender(false);
@@ -948,6 +970,31 @@ function realtimeLabel() {
 function startFallbackPolling() {
   if (document.hidden) return;
   activePoller().start();
+}
+
+// WS 握手失败在浏览器里没有可读的 HTTP 状态码 → 用一次**单机** REST 探测区分原因（每代只探一次）。
+// 401 的界面处理归 api 层（清令牌 + 提示登录），这里只补 403 的提示；
+// 探测成功或其它失败一律静默降级（轮询接管，不反复弹提示）。
+async function probeRealtimeFailure(generation) {
+  // 每代一次 + 最短间隔：可见性事件在部分环境下会连续触发（每次都换新代），
+  // 只按代去重仍可能连续探测；这里再加一道 30 秒间隔闸门。
+  if (realtime.probedGeneration === generation) return;
+  if (Date.now() - realtime.probedAt < PROBE_MIN_INTERVAL_MS) return;
+  realtime.probedGeneration = generation;
+  realtime.probedAt = Date.now();
+  const id = detailId() || state.nodes[0]?.uuid || "";
+  if (!id) return;
+  try {
+    await api.getServer(id, { timeout: 8000 });
+  } catch (error) {
+    if (generation !== realtime.generation) return;
+    const status = Number(error?.status) || 0;
+    if (status === 403) showToast(t("realtimeMonitoring"), t("realtimeProbeForbidden"), "warning");
+    else if (status === 401) console.warn("[CFSM Butterfly] realtime probe: unauthorized");
+    return;
+  }
+  if (generation !== realtime.generation) return;
+  console.info("[CFSM Butterfly] realtime probe: REST reachable, WebSocket unavailable");
 }
 
 // 按当前作用域选兜底通道：detail 只轮询单机，list 走整表快照。
@@ -2250,6 +2297,10 @@ function aggregateMetrics() {
   const statuses = state.nodes.map(node => nodeStatus(node.uuid)).filter(Boolean);
   const onlineStatuses = statuses.filter(status => status.online === true);
   const online = state.nodes.filter(node => nodeIsOnline(node.uuid)).length;
+  const freshDiskStatuses = state.nodes
+    .filter(node => nodeIsOnline(node.uuid) && !statusReportStale(node.uuid))
+    .map(node => nodeStatus(node.uuid))
+    .filter(Boolean);
   const regions = new Set(state.nodes.map(node => String(node.region || "").trim()).filter(Boolean)).size;
   const latencies = onlineStatuses.map(bestLatency).filter(value => value !== null);
   return {
@@ -2265,7 +2316,7 @@ function aggregateMetrics() {
     totalDownload: sum(statuses.map(status => status.net_total_down)),
     avgCpu: mean(onlineStatuses.map(status => finiteNumber(status.cpu))),
     avgMemory: mean(onlineStatuses.map(status => percent(status.ram, status.ram_total))),
-    avgDisk: mean(onlineStatuses.map(status => percent(status.disk, status.disk_total))),
+    avgDisk: mean(freshDiskStatuses.map(status => percent(status.disk, status.disk_total))),
   };
 }
 
@@ -2720,7 +2771,9 @@ function renderNodeCard(node, index) {
   const cpu = clamp(status.cpu, 0, 100);
   const memory = percent(status.ram, status.ram_total || node.mem_total);
   const disk = percent(status.disk, status.disk_total || node.disk_total);
-  const latency = bestLatency(status);
+  // 磁盘与线路延迟是报告级字段：过期后按不可用展示（CPU/内存来自高频样本，不受影响）
+  const stale = statusReportStale(node.uuid);
+  const latency = stale ? null : bestLatency(status);
   const latencyInfo = latencyClass(latency);
   const colors = ["var(--accent)", "#2aa6d6", "#8a61e8", "#ec8d3d", "#2ab59b", "#d35f91", "#4f83e6", "#e06067"];
   const color = colors[index % colors.length];
@@ -2741,7 +2794,7 @@ function renderNodeCard(node, index) {
     </div>
     <button class="favorite-button${favorite ? " is-active" : ""}" type="button" data-favorite-uuid="${escapeHtml(node.uuid)}" aria-label="${escapeHtml(t("favorites"))}">${icon("favorites", 16)}</button>
     <div class="node-main">
-      <div class="node-meters">${meter(t("cpu"), cpu)}${meter(t("memory"), memory)}${meter(t("disk"), disk, disk > 82 ? "var(--red)" : undefined)}</div>
+      <div class="node-meters">${meter(t("cpu"), cpu)}${meter(t("memory"), memory)}${meter(t("disk"), stale ? null : disk, disk > 82 ? "var(--red)" : undefined)}</div>
       ${lineChart(samples)}
     </div>
     ${protocolTags ? `<div class="ip-tags">${protocolTags}</div>` : ""}
@@ -2766,7 +2819,11 @@ function renderRemainingTraffic(node) {
 }
 
 function meter(label, value, color) {
-  return `<div class="meter-row"><div class="meter-label"><span>${escapeHtml(label)}</span><strong>${formatPercent(value)}</strong></div><div class="meter-track"><div class="meter-value" style="width:${clamp(value, 0, 100)}%;${color ? `--meter-color:${color}` : ""}"></div></div></div>`;
+  // `null` = 该指标不可用（例如报告级字段已过期）→ 显示占位符，不画进度条
+  const unavailable = value === null || value === undefined || !Number.isFinite(Number(value));
+  const shown = unavailable ? "—" : formatPercent(value);
+  const bar = unavailable ? "" : `<div class="meter-value" style="width:${clamp(value, 0, 100)}%;${color ? `--meter-color:${color}` : ""}"></div>`;
+  return `<div class="meter-row"><div class="meter-label"><span>${escapeHtml(label)}</span><strong>${escapeHtml(shown)}</strong></div><div class="meter-track">${bar}</div></div>`;
 }
 
 function buildAlerts() {
@@ -2778,6 +2835,8 @@ function buildAlerts() {
       alerts.push({ uuid: node.uuid, title: node.name || node.uuid, message: t("maintenance"), severity: "offline", time: node.updated_at || new Date().toISOString() });
       continue;
     }
+    // 报告级字段过期时，磁盘/丢包判定用的是上一轮旧值 → 不据此产生告警
+    if (statusReportStale(node.uuid)) continue;
     const cpu = clamp(status.cpu, 0, 100);
     const memory = percent(status.ram, status.ram_total || node.mem_total);
     const disk = percent(status.disk, status.disk_total || node.disk_total);
@@ -3070,11 +3129,12 @@ function renderDrawer() {
   // 已删除/已隐藏/深链接有误：给"未找到"反馈，不留空抽屉
   if (!node) return renderDrawerMissing(state.drawerUuid);
   const status = nodeStatus(node.uuid) || {};
-  const latency = bestLatency(status);
+  const stale = statusReportStale(node.uuid);
+  const latency = stale ? null : bestLatency(status);
   const memory = percent(status.ram, status.ram_total || node.mem_total);
   const disk = percent(status.disk, status.disk_total || node.disk_total);
   return `<button class="drawer-handle" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}"><span></span></button><div class="drawer-scroll"><header class="drawer-header"><span class="drawer-node-flag">${regionFlag(node.region)}</span><div class="drawer-title"><h2>${escapeHtml(node.name || node.uuid)}</h2><p>${escapeHtml(nodeSubtitle(node))}</p></div><button class="icon-button drawer-close" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}">${icon("close")}</button></header>
-    <div class="drawer-body"><div class="drawer-status-strip">${drawerStat(t("cpu"), formatPercent(status.cpu))}${drawerStat(t("memory"), formatPercent(memory))}${drawerStat(t("disk"), formatPercent(disk))}${drawerStat(t("averageLatency"), latency === null ? "—" : `${Math.round(latency)} ms`)}</div>
+    <div class="drawer-body"><div class="drawer-status-strip">${drawerStat(t("cpu"), formatPercent(status.cpu))}${drawerStat(t("memory"), formatPercent(memory))}${drawerStat(t("disk"), stale ? "—" : formatPercent(disk))}${drawerStat(t("averageLatency"), latency === null ? "—" : `${Math.round(latency)} ms`)}</div>
       ${state.drawerLoading ? `<div class="drawer-loading"><div><div class="drawer-loading-spinner"></div>${escapeHtml(t("loadingDetails"))}</div></div>` : `${state.drawerHistoryError ? `<p class="drawer-notice is-warning" role="status">${icon("warning", 14)}${escapeHtml(t("drawerHistoryUnavailable"))}</p>` : ""}${renderDrawerCharts(node, status)}${renderDrawerLines(node, status)}${renderBilling(node, status)}`}
       ${renderHardware(node, status)}
     </div></div>`;
@@ -3107,7 +3167,9 @@ function renderDrawerCharts(node, status) {
 function renderDrawerLines(node, status) {
   const lines = Object.values(status.ping || {}).filter(isRecord);
   if (!lines.length) return "";
-  const window = Array.isArray(node?.cfsm?.latencyWindow) ? node.cfsm.latencyWindow : [];
+  // 三网延迟/丢包同样是报告级字段：过期后不再展示上一轮的数值与迷你柱
+  const stale = statusReportStale(node.uuid);
+  const window = stale ? [] : (Array.isArray(node?.cfsm?.latencyWindow) ? node.cfsm.latencyWindow : []);
   const rows = lines
     .map(line => {
       const samples = window
@@ -3119,8 +3181,9 @@ function renderDrawerLines(node, status) {
         .map(value => `<span class="line-spark-bar" style="height:${max > 0 ? Math.max(12, Math.round((value / max) * 100)) : 12}%"></span>`)
         .join("");
       const loss = finiteNumber(line.loss);
-      const latest = Number.isFinite(line.latest) ? `${Math.round(line.latest)} ms` : t("noLatency");
-      return `<div class="line-row"><div class="line-row-head"><span class="line-row-name">${escapeHtml(line.name || line.id)}</span><span class="line-row-value">${escapeHtml(latest)}</span><span class="line-row-loss${loss > 0 ? " is-warm" : ""}">${escapeHtml(`${loss.toFixed(1)}%`)}</span></div>${bars ? `<div class="line-spark">${bars}</div>` : ""}</div>`;
+      const latest = !stale && Number.isFinite(line.latest) ? `${Math.round(line.latest)} ms` : (stale ? "—" : t("noLatency"));
+      const lossText = stale ? "—" : `${loss.toFixed(1)}%`;
+      return `<div class="line-row"><div class="line-row-head"><span class="line-row-name">${escapeHtml(line.name || line.id)}</span><span class="line-row-value">${escapeHtml(latest)}</span><span class="line-row-loss${!stale && loss > 0 ? " is-warm" : ""}">${escapeHtml(lossText)}</span></div>${bars ? `<div class="line-spark">${bars}</div>` : ""}</div>`;
     })
     .join("");
   return `<section class="drawer-section"><div class="drawer-section-heading"><h3>${escapeHtml(t("threeNetLatency"))}</h3><span class="connection-pill">${escapeHtml(t("lossRate"))}</span></div>${rows}</section>`;
@@ -3162,13 +3225,14 @@ function renderBilling(node, status) {
 }
 
 function renderHardware(node, status) {
+  const stale = statusReportStale(node.uuid);
   const connectionTotal = finiteNumber(status.connections);
   const udp = finiteNumber(status.connections_udp);
   const tcp = Math.max(connectionTotal - Math.min(udp, connectionTotal), 0);
   const items = [
     [t("os"), node.os], [t("kernel"), node.kernel_version], [t("architecture"), node.arch], [t("virtualization"), node.virtualization],
     [t("cpuName"), node.cpu_name], [t("cpuCores"), node.cpu_cores], [t("gpu"), node.gpu_name], [t("load"), `${finiteNumber(status.load).toFixed(2)} / ${finiteNumber(status.load5).toFixed(2)} / ${finiteNumber(status.load15).toFixed(2)}`],
-    [t("process"), status.process], [t("connections"), `TCP ${Math.round(tcp)} · UDP ${Math.round(udp)}`], [t("group"), node.group], [t("tags"), nodeTags(node).join(", ")],
+    [t("process"), stale ? "—" : status.process], [t("connections"), stale ? "—" : `TCP ${Math.round(tcp)} · UDP ${Math.round(udp)}`], [t("group"), node.group], [t("tags"), nodeTags(node).join(", ")],
     // CFSM 无数据源的字段（虚拟化、显卡、无标签）直接隐藏，不显示成"未知"
   ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== "");
   if (node.ipv4) items.push([t("ipv4"), node.ipv4]);
@@ -3553,17 +3617,20 @@ function applyDetailPayload(raw) {
 }
 
 // detail 的单机刷新：`GET /api/server?id=`（约 1 KB），**绝不**退化成整表快照。
-async function refreshDetailStatus() {
+async function refreshDetailStatus({ generation = realtime.generation } = {}) {
   const id = detailId();
-  if (!id) return { ok: false, error: new Error(t("nodeNotFound")) };
+  if (!id) return { ok: false, stale: false, error: new Error(t("nodeNotFound")) };
   try {
-    applyDetailPayload(await api.getServer(id, { timeout: 15000 }));
+    const raw = await api.getServer(id, { timeout: 15000 });
+    if (generation !== realtime.generation) return { ok: true, stale: true, error: null };
+    applyDetailPayload(raw);
     scheduleStatusRender(false);
-    return { ok: true, error: null };
+    return { ok: true, stale: false, error: null };
   } catch (error) {
+    if (generation !== realtime.generation) return { ok: true, stale: true, error: null };
     state.connected = false;
     scheduleStatusRender(false);
-    return { ok: false, error };
+    return { ok: false, stale: false, error };
   }
 }
 
@@ -3870,7 +3937,7 @@ function handleClick(event) {
     state.regionSelected = null;
     renderApp();
   } else if (action === "refresh") {
-    refreshStatuses(true);
+    refreshStatuses({ manual: true });
   } else if (action === "retry") {
     initialize();
   }
@@ -4118,17 +4185,20 @@ async function loadListData() {
   state.dataScope = DATA_SCOPE.list;
 }
 
-async function refreshStatuses(manual = false) {
-  if (statusRefreshInFlight) return;
+// 数据刷新（手动 / 轮询 / 可见性恢复共用）：返回结构化结果而非依赖共享状态。
+// `{ ok, error, stale }`：`stale = true` 表示发起代已被取代，结果既不写入也不计成败。
+async function refreshStatuses({ manual = false, reason = "poll", generation = realtime.generation } = {}) {
+  if (statusRefreshInFlight) return { ok: true, stale: true, error: null, reason };
   statusRefreshInFlight = true;
   try {
+    if (generation !== realtime.generation) return { ok: true, stale: true, error: null, reason };
     if (state.dataScope === DATA_SCOPE.detail) {
-      const result = await refreshDetailStatus();
+      const result = await refreshDetailStatus({ generation });
       if (manual) {
         if (result.ok) showToast(t("realtimeMonitoring"), t("updatedNow"), "success");
-        else showToast(t("disconnected"), result.error instanceof Error ? result.error.message : t("offlineData"), "warning");
+        else if (!result.stale) showToast(t("disconnected"), result.error instanceof Error ? result.error.message : t("offlineData"), "warning");
       }
-      return;
+      return { ...result, reason };
     }
     if (state.demoMode) {
       mutateDemoStatuses();
@@ -4137,16 +4207,22 @@ async function refreshStatuses(manual = false) {
       updateSamples();
       scheduleStatusRender(manual);
       if (manual) showToast(t("realtimeMonitoring"), t("updatedNow"), "success");
-      return;
+      return { ok: true, stale: false, error: null, reason };
     }
     try {
-      applyServersPayload(await api.getServers({ timeout: 15000 }));
+      const payload = await api.getServers({ timeout: 15000 });
+      // 在途请求返回时若代已切换（可见性变化、深链↔列表、目标切换），丢弃结果而不是覆盖新状态
+      if (generation !== realtime.generation) return { ok: true, stale: true, error: null, reason };
+      applyServersPayload(payload);
       scheduleStatusRender(manual);
       if (manual) showToast(t("realtimeMonitoring"), t("updatedNow"), "success");
+      return { ok: true, stale: false, error: null, reason };
     } catch (error) {
+      if (generation !== realtime.generation) return { ok: true, stale: true, error: null, reason };
       state.connected = false;
       scheduleStatusRender(manual);
       if (manual) showToast(t("disconnected"), error instanceof Error ? error.message : t("offlineData"), "warning");
+      return { ok: false, stale: false, error, reason };
     }
   } finally {
     statusRefreshInFlight = false;
@@ -4187,7 +4263,7 @@ async function resumeRealtime() {
   // 先起轮询保证有数据，再尝试 WS；顺序反了会出现"恢复可见后空白等首帧"。
   startFallbackPolling();
   try {
-    await refreshStatuses(false);
+    await refreshStatuses({ reason: "visible" });
   } catch {
     // 失败交给轮询退避处理
   }

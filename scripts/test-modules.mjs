@@ -180,6 +180,46 @@ check("单机作用域不新增整表轮询路径（app.js）", () => {
   assert.match(appSource, /function activePoller\(\) \{\s*return state\.dataScope === DATA_SCOPE\.detail \? detailPoller : statusPoller;/);
 });
 
+// --- 批次 4：报告级字段过期、结构化刷新、握手失败探测 ---
+
+check("报告级字段过期判定已接入各展示点（app.js）", () => {
+  assert.match(appSource, /function statusReportStale\(uuid\) \{/);
+  assert.match(appSource, /isReportStale\(nodeStatus\(uuid\), \{ staleAfterMs: reportStaleAfterMs\(\) \}\)/);
+  // 卡片、抽屉统计、线路延迟、硬件块、告警、平均磁盘都要用上
+  const uses = appSource.match(/statusReportStale\(/g) || [];
+  assert.ok(uses.length >= 7, `statusReportStale 调用点应 >= 7（含定义），实际 ${uses.length}`);
+  assert.match(appSource, /const latency = stale \? null : bestLatency\(status\);/);
+  assert.match(appSource, /if \(statusReportStale\(node\.uuid\)\) continue;/);
+});
+
+check("刷新函数返回结构化结果且不再依赖 state.connected 判失败（app.js）", () => {
+  assert.match(appSource, /async function refreshStatuses\(\{ manual = false, reason = "poll", generation = realtime\.generation \} = \{\}\)/);
+  assert.match(appSource, /return \{ ok: true, stale: true, error: null, reason \};/);
+  const poller = appSource.match(/const statusPoller = createPoller\(\{[\s\S]*?\n\}\);/);
+  assert.ok(poller, "statusPoller 应存在");
+  // 注释里的旧机制说明不算：只看去掉行注释后的代码
+  assert.doesNotMatch(poller[0].replace(/\/\/[^\n]*/g, ""), /state\.connected/, "轮询器不得再用 state.connected 判成败");
+});
+
+check("generation 覆盖 REST 结果（在途请求不得覆盖新状态）", () => {
+  const fn = appSource.match(/async function refreshStatuses\([\s\S]*?\n\}/);
+  assert.ok(fn, "refreshStatuses 应存在");
+  const checks = fn[0].match(/generation !== realtime\.generation/g) || [];
+  assert.ok(checks.length >= 3, `refreshStatuses 内代检查应 >= 3 处，实际 ${checks.length}`);
+  const detail = appSource.match(/async function refreshDetailStatus\(\{ generation[\s\S]*?\n\}/);
+  assert.ok(detail, "refreshDetailStatus 应接受 generation");
+  const detailChecks = detail[0].match(/generation !== realtime\.generation/g) || [];
+  assert.ok(detailChecks.length >= 2, `refreshDetailStatus 内代检查应 >= 2 处，实际 ${detailChecks.length}`);
+});
+
+check("WS 失败原因探测：每代一次，403 提示（app.js）", () => {
+  assert.match(appSource, /probedGeneration: -1/);
+  assert.match(appSource, /async function probeRealtimeFailure\(generation\) \{/);
+  assert.match(appSource, /if \(realtime\.probedGeneration === generation\) return;/);
+  assert.match(appSource, /void probeRealtimeFailure\(realtime\.generation\);/);
+  assert.match(appSource, /realtimeProbeForbidden/);
+});
+
 // --- 结果 ---
 
 if (failures.length) {

@@ -4,7 +4,7 @@
 // 不碰 DOM 与全局状态；编排（何时建连、何时降级轮询）在 app.js。
 // 依据：官方 `theme-develop.md` 与 `API.md`（v2.8.5）——`subscribe=all` 默认不推送，
 // 必须显式发送 `{type:"subscribe", scope:"all", ids}`；非法 scope/ids 以关闭码 1008 断开。
-import { mapStatus } from "./cfsm-map.js?v=0.7.2";
+import { mapStatus } from "./cfsm-map.js?v=0.7.3";
 
 // 服务端约束（API.md）：ids ≤ 500 个，单个 id 长度 1–64，字符集 [A-Za-z0-9._:-]。
 export const REALTIME_LIMITS = Object.freeze({
@@ -239,6 +239,9 @@ export function createRealtimeChannel({
   onStateChange = null,
   subscribeScope = DEFAULT_SUBSCRIBE_SCOPE,
   subscribeTimeoutMs = 8000,
+  // 按需心跳：进入 live 后若这段时间没有任何服务端消息才发一次 `{type:"ping"}`。
+  // 服务端按合并窗口推送（约 5 秒），正常情况下永远轮不到它；只在长静默连接上保活。
+  pingIdleMs = 60000,
   backoffMinMs = 1000,
   backoffMaxMs = 30000,
   random = Math.random,
@@ -250,6 +253,7 @@ export function createRealtimeChannel({
   let attempt = 0;
   let reconnectTimer = null;
   let subscribeTimer = null;
+  let idleTimer = null;
   let stopped = true;
   let ids = [];
   let fatalCode = 0;
@@ -264,6 +268,25 @@ export function createRealtimeChannel({
       clearTimeoutImpl(subscribeTimer);
       subscribeTimer = null;
     }
+  };
+
+  const clearIdlePing = () => {
+    if (idleTimer !== null) {
+      clearTimeoutImpl(idleTimer);
+      idleTimer = null;
+    }
+  };
+
+  // 「按需」= 只在 live 且长时间没有收到任何消息时才发 ping；收到任何消息都会重置计时。
+  const scheduleIdlePing = () => {
+    clearIdlePing();
+    if (!pingIdleMs || stopped || state !== "live") return;
+    idleTimer = setTimeoutImpl(() => {
+      idleTimer = null;
+      if (stopped || state !== "live") return;
+      send({ type: "ping" });
+      scheduleIdlePing();
+    }, pingIdleMs);
   };
 
   const send = (payload) => {
@@ -339,10 +362,13 @@ export function createRealtimeChannel({
     ws.onmessage = (event) => {
       const message = parseRealtimeMessage(event?.data);
       if (!message) return;
+      // 任何服务端消息（含 pong）都算活动：重置按需心跳
+      scheduleIdlePing();
       if (message.type === "subscribed") {
         clearSubscribeTimer();
         attempt = 0;
         emit("live");
+        scheduleIdlePing();
         return;
       }
       // 只透传增量批次：其余（hello / pong 等）由本模块自行消化。
@@ -380,6 +406,7 @@ export function createRealtimeChannel({
       const wasRunning = !stopped;
       stopped = true;
       clearSubscribeTimer();
+      clearIdlePing();
       if (reconnectTimer !== null) {
         clearTimeoutImpl(reconnectTimer);
         reconnectTimer = null;
