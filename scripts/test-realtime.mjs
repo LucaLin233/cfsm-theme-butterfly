@@ -7,6 +7,7 @@ import {
   buildWsUrl,
   createRealtimeChannel,
   extractSamples,
+  isReportGroupStale,
   isReportStale,
   mergeStatusUpdate,
   normalizeIds,
@@ -401,6 +402,26 @@ await checkAsync("按需 ping 关闭时（pingIdleMs=0）不产生额外计时�
   socket.receive(JSON.stringify({ type: "subscribed", ts: 1 }));
   assert.equal(timers.pendingCount, 0);
   channel.stop();
+});
+
+// --- 报告级字段逐组过期（R2）---
+
+check("报告级字段按组记录最后出现时间，未出现的组不被刷新", () => {
+  const first = mergeStatusUpdate(null, { id: "srv-1", disk_used: 100, disk_total: 200 }, { now: 1000 });
+  assert.equal(first.cfsm_report_seen.disk, 1000);
+  assert.equal(first.cfsm_report_at, 1000);
+  const second = mergeStatusUpdate(first, { id: "srv-1", ping_ct: 23 }, { now: 5000 });
+  assert.equal(second.cfsm_report_seen.line, 5000, "本次出现的组应记录新时间");
+  assert.equal(second.cfsm_report_seen.disk, 1000, "未出现的组不得被顺带刷新");
+  assert.equal(second.cfsm_report_at, 5000);
+});
+
+check("isReportGroupStale：出现过且超时才判过期，从未出现不判", () => {
+  const status = { cfsm_report_seen: { disk: 1000 } };
+  assert.equal(isReportGroupStale(status, "disk", { now: 11000, staleAfterMs: 5000 }), true);
+  assert.equal(isReportGroupStale(status, "disk", { now: 2000, staleAfterMs: 5000 }), false);
+  assert.equal(isReportGroupStale(status, "line", { now: 10 ** 12, staleAfterMs: 5000 }), false, "从未出现的组不判过期");
+  assert.equal(isReportGroupStale(status, "disk", { now: 10 ** 12, staleAfterMs: 0 }), false, "未启用过期则不判");
 });
 
 // --- 计时器路径：旧代计时器不得在新代生效 ---

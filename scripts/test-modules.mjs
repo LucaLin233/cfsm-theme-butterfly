@@ -182,14 +182,17 @@ check("单机作用域不新增整表轮询路径（app.js）", () => {
 
 // --- 批次 4：报告级字段过期、结构化刷新、握手失败探测 ---
 
-check("报告级字段过期判定已接入各展示点（app.js）", () => {
-  assert.match(appSource, /function statusReportStale\(uuid\) \{/);
-  assert.match(appSource, /isReportStale\(nodeStatus\(uuid\), \{ staleAfterMs: reportStaleAfterMs\(\) \}\)/);
-  // 卡片、抽屉统计、线路延迟、硬件块、告警、平均磁盘都要用上
+check("报告级字段逐组过期判定已接入各展示点（app.js）", () => {
+  assert.match(appSource, /function statusReportStale\(uuid, group = null\) \{/);
+  assert.match(appSource, /isReportGroupStale\(status, group, \{ staleAfterMs \}\)/);
+  assert.match(appSource, /return isReportStale\(status, \{ staleAfterMs \}\);/);
   const uses = appSource.match(/statusReportStale\(/g) || [];
-  assert.ok(uses.length >= 7, `statusReportStale 调用点应 >= 7（含定义），实际 ${uses.length}`);
-  assert.match(appSource, /const latency = stale \? null : bestLatency\(status\);/);
-  assert.match(appSource, /if \(statusReportStale\(node\.uuid\)\) continue;/);
+  assert.ok(uses.length >= 10, `statusReportStale 调用点应 >= 10（含定义），实际 ${uses.length}`);
+  // 逐组接入：探针持续上报不得延长磁盘/内存总量/运行时长/系统指标的过期判定
+  for (const group of ["disk", "line", "boot", "metrics"]) {
+    assert.ok(appSource.includes(`statusReportStale(node.uuid, "${group}")`), `缺少 ${group} 组的判定接入`);
+  }
+  assert.match(appSource, /const latency = lineStale \? null : bestLatency\(status\);/);
 });
 
 check("刷新函数返回结构化结果且不再依赖 state.connected 判失败（app.js）", () => {
