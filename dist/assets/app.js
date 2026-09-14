@@ -52,6 +52,40 @@ const PROBE_MIN_INTERVAL_MS = 30000;
 // 渲染闸门探针（DRAFT-v3 §A6 的调用计数断言）：detail 作用域下这些全局辅助必须 0 次调用。
 // 计数器常驻（每次 +1 的开销可忽略），仅在 `?debug=1` 时挂到 window 供浏览器验收读取。
 const renderCounters = { aggregateMetrics: 0, buildAlerts: 0, buildTrafficSeries: 0, filteredNodes: 0, renderCurrentView: 0 };
+
+// 批次 5.2 第一步（仅观测，不改变渲染行为）：结构签名。
+// 签名只包含会改变 DOM 节点身份/数量/顺序的量；固定模板的显隐与值不进签名（见 PLAN-5.0-v3 §3.1）。
+const structureCounters = { samples: 0, changes: 0 };
+let lastStructureSignature = null;
+
+function structureSignature() {
+  const scope = state.dataScope === DATA_SCOPE.detail ? "detail" : "list";
+  // filteredNodes() 返回的是已排序结果（含 offline_position 与 state.sort），故其顺序即有序 id 分量；
+  // 延迟/流量排序下顺序会随状态变化 —— 这正是必须进签名、不能靠字段白名单判定的原因。
+  const orderedIds = filteredNodes().map((node) => node.uuid);
+  return [
+    scope,
+    state.currentView || "",
+    state.filter || "",
+    state.detailNode?.uuid || "",
+    state.sort || "",
+    state.config?.offline_position || "",
+    [...state.favorites].sort().join("|"),
+    orderedIds.join(","),
+  ].join("\u0001");
+}
+
+function observeStructureSignature() {
+  let signature = null;
+  try {
+    signature = structureSignature();
+  } catch {
+    signature = "\u0002error"; // 派生失败：保守视作结构变化（v3 §3.1）
+  }
+  structureCounters.samples++;
+  if (lastStructureSignature !== null && signature !== lastStructureSignature) structureCounters.changes++;
+  lastStructureSignature = signature;
+}
 // 文字缩放（作用于 CSS 变量 --text-scale，见 styles.css 末尾）。
 // 档位值即系数；标准 = 1.25 是用户实测确认的基准，其它档位以它为基准等比排布。
 const TEXT_SCALE_OPTIONS = Object.freeze(["1.12", "1.25", "1.4", "1.55", "1.75"]);
@@ -2573,6 +2607,7 @@ function navItem(view, iconName, badge = null) {
 }
 
 function renderCurrentView(metrics) {
+  observeStructureSignature();
   renderCounters.renderCurrentView += 1;
   if (state.currentView === "regions") return renderRegionsView(metrics);
   if (state.currentView === "traffic") return renderTrafficView(metrics);
@@ -4486,4 +4521,5 @@ window.visualViewport?.addEventListener("scroll", scheduleMobileInputState, { pa
 updateMobileInputState();
 // `?debug=1` 时暴露渲染闸门探针（浏览器验收读 detail 作用域下的调用次数，见 renderCounters）
 if (new URLSearchParams(location.search).get("debug") === "1") window.__cfsmRenderCounters = renderCounters;
+  window.__cfsmStructureCounters = structureCounters;
 initialize();
