@@ -1,5 +1,6 @@
 import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=__THEME_VERSION__";
-import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking } from "./cfsm-api.js?v=__THEME_VERSION__";
+import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking, readStoredToken } from "./cfsm-api.js?v=__THEME_VERSION__";
+import { buildWsUrl, createRealtimeChannel, extractSamples, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=__THEME_VERSION__";
 import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=__THEME_VERSION__";
 import { mapHistoryRows, mapServers } from "./cfsm-map.js?v=__THEME_VERSION__";
 
@@ -161,7 +162,8 @@ const STRINGS = {
     viewAll: "查看全部",
     noAlerts: "当前没有需要处理的提醒",
     realtimeMonitoring: "实时监控",
-    realtimeMonitoringCopy: "按设定间隔自动刷新",
+    realtimeMonitoringCopy: "实时推送，断线自动降级轮询",
+    realtimeTimeoutPrompt: "实时连接已达到站点设定的时限。\n\n点「确定」重新连接，「取消」改为定时轮询。",
     globalCoverage: "全球覆盖",
     globalCoverageCopy: "{regions} 个区域 · {nodes} 个节点",
     openSource: "开放源码",
@@ -352,7 +354,8 @@ const STRINGS = {
     viewAll: "View all",
     noAlerts: "No alerts require attention",
     realtimeMonitoring: "Real-time monitoring",
-    realtimeMonitoringCopy: "Refreshes at the configured interval",
+    realtimeMonitoringCopy: "Live push, automatic polling fallback",
+    realtimeTimeoutPrompt: "The live connection reached the limit set by this site.\n\nOK reconnects, Cancel switches to periodic polling.",
     globalCoverage: "Global coverage",
     globalCoverageCopy: "{regions} regions · {nodes} nodes",
     openSource: "Open source",
@@ -543,7 +546,8 @@ const STRINGS = {
     viewAll: "すべて表示",
     noAlerts: "対応が必要な通知はありません",
     realtimeMonitoring: "リアルタイム監視",
-    realtimeMonitoringCopy: "設定された間隔で自動更新",
+    realtimeMonitoringCopy: "リアルタイム配信、切断時はポーリングへ自動降格",
+    realtimeTimeoutPrompt: "リアルタイム接続がサイト設定の上限に達しました。\n\nOK で再接続、キャンセルで定期ポーリングに切り替えます。",
     globalCoverage: "グローバルカバレッジ",
     globalCoverageCopy: "{regions} リージョン · {nodes} ノード",
     openSource: "オープンソース",
@@ -775,6 +779,202 @@ const statusPoller = createPoller({
   },
   onError: () => scheduleStatusRender(false),
 });
+
+// —— 实时链路编排：单一 owner（generation 失效旧回调），WebSocket 优先、失败降级轮询 ——
+// 数据来源始终是 `/api/servers` 快照 + `/api/ws` 增量；两条通道不会同时驱动状态更新：
+// WS 进入 live 即停轮询，WS 异常期间轮询兜底，ws 终止态（1008）后不再重连。
+const realtime = {
+  generation: 0,
+  channel: null,
+  mode: "idle", // idle | connecting | live | fallback | fatal
+  visibleMs: 0,
+  timeoutTimer: null,
+  optedOut: false,
+};
+
+function hasNode(uuid) {
+  return state.nodes.some(node => node.uuid === uuid);
+}
+
+// 订阅集合 = 可见节点（与列表一致）；服务端约束见 cfsm-realtime 的 normalizeIds。
+function subscriptionIds() {
+  const ids = state.nodes.filter(node => !node.hidden).map(node => node.uuid);
+  const normalized = normalizeIds(ids);
+  if (!normalized.ok) {
+    console.warn("[CFSM Butterfly] realtime ids rejected", {
+      rejected: normalized.rejected.slice(0, 5),
+      rejectedCount: normalized.rejected.length,
+      overflow: normalized.overflow,
+      kept: normalized.ids.length,
+    });
+  }
+  return normalized.ids;
+}
+
+// 报告级字段（三网延迟/丢包、磁盘、启动时间）过期窗口：max(3 × report_interval, 5 分钟)。
+// 过期只标记不删除 —— 实时样本不是完整报告，缺字段不能当作已清除。
+function reportStaleAfterMs() {
+  const intervals = state.nodes
+    .map(node => Number(node.cfsm?.reportInterval))
+    .filter(value => Number.isFinite(value) && value > 0);
+  const base = intervals.length ? Math.min(...intervals) : 60;
+  return Math.max(3 * base * 1000, 5 * 60 * 1000);
+}
+
+function applyRealtimeBatch(message) {
+  const samples = extractSamples(message);
+  if (!samples.length) return 0;
+  const sources = [state.sysConfig || {}, state.cfsmConfig || {}];
+  const now = Date.now();
+  let applied = 0;
+  for (const sample of samples) {
+    if (!hasNode(sample.serverId)) continue;
+    const merged = mergeStatusUpdate(state.statuses[sample.serverId] || null, sample.data, {
+      sources,
+      now,
+      id: sample.serverId,
+    });
+    if (!merged) continue;
+    state.statuses[sample.serverId] = merged;
+    applied += 1;
+  }
+  if (applied) {
+    state.connected = true;
+    state.lastUpdated = now;
+    updateSamples();
+  }
+  return applied;
+}
+
+function handleRealtimeMessage(message) {
+  if (message.type !== "batchUpdate") return;
+  if (applyRealtimeBatch(message) > 0) scheduleStatusRender(false);
+}
+
+function handleRealtimeState({ state: next, code, reason }) {
+  if (next === "live") {
+    if (realtime.mode !== "live") {
+      realtime.mode = "live";
+      stopFallbackPolling();
+      scheduleStatusRender(false);
+    }
+    return;
+  }
+  if (next === "fatal") {
+    // 1008 等终止态：不再重连，长期以轮询运行。
+    realtime.mode = "fatal";
+    console.warn("[CFSM Butterfly] realtime disabled", { code, reason });
+    startFallbackPolling();
+    return;
+  }
+  if (next === "closed" || next === "connecting") {
+    // 重连期间保持轮询兜底，避免数据停更。
+    startFallbackPolling();
+    // 断线后补一次快照，但必须节流：退避早期（1s/2s/4s）会连续失败，
+    // 不加限制时每次失败都拉一份完整快照（约 230 KB），反而比轮询更费流量。
+    if (next === "closed" && Date.now() - (state.lastUpdated || 0) > statusPollIntervalMs()) {
+      void statusPoller.refreshNow();
+    }
+  }
+}
+
+function startFallbackPolling() {
+  if (document.hidden) return;
+  statusPoller.start();
+}
+
+// 快照间隔（秒 → 毫秒），用于节流"断线后补快照"。
+function statusPollIntervalMs() {
+  const seconds = Number(state.config?.poll_interval);
+  return (Number.isFinite(seconds) && seconds > 0 ? seconds : 30) * 1000;
+}
+
+function stopFallbackPolling() {
+  statusPoller.stop();
+}
+
+// `frontend_ws_timeout_minutes`（/api/config）只累计可见时间；0 或非法值表示不超时。
+function wsTimeoutMinutes() {
+  const value = Number(state.cfsmConfig?.frontend_ws_timeout_minutes);
+  if (!Number.isFinite(value) || value <= 0 || value > 1440) return 0;
+  return value;
+}
+
+function stopRealtimeTimeoutWatch() {
+  if (realtime.timeoutTimer !== null) {
+    clearInterval(realtime.timeoutTimer);
+    realtime.timeoutTimer = null;
+  }
+}
+
+function startRealtimeTimeoutWatch() {
+  stopRealtimeTimeoutWatch();
+  const minutes = wsTimeoutMinutes();
+  if (!minutes) return;
+  const limitMs = minutes * 60 * 1000;
+  realtime.visibleMs = 0;
+  realtime.timeoutTimer = setInterval(() => {
+    if (document.hidden || !realtime.channel?.isLive()) return;
+    realtime.visibleMs += 1000;
+    if (realtime.visibleMs < limitMs) return;
+    stopRealtimeTimeoutWatch();
+    stopRealtimeChannel();
+    const resume = window.confirm(t("realtimeTimeoutPrompt"));
+    if (resume) {
+      realtime.visibleMs = 0;
+      startRealtime("timeout-resume");
+    } else {
+      realtime.optedOut = true;
+      startFallbackPolling();
+    }
+  }, 1000);
+}
+
+function stopRealtimeChannel() {
+  realtime.channel?.stop();
+  realtime.channel = null;
+  stopRealtimeTimeoutWatch();
+}
+
+function startRealtime(reason = "init") {
+  const generation = ++realtime.generation;
+  stopRealtimeChannel();
+  if (state.demoMode) {
+    realtime.mode = "fallback";
+    startFallbackPolling();
+    return;
+  }
+  if (realtime.optedOut) {
+    realtime.mode = "fallback";
+    startFallbackPolling();
+    return;
+  }
+  // 页面不可见时不建立连接：后台标签里的 WS 既拿不到推送（定时器被节流），
+  // 又白占一条服务端连接；等 handleVisibilityChange 恢复可见时再建。
+  if (document.hidden) {
+    realtime.mode = "idle";
+    return;
+  }
+  const url = buildWsUrl(location.origin, { token: readStoredToken() });
+  const channel = createRealtimeChannel({
+    url,
+    onMessage: (message) => {
+      if (generation !== realtime.generation) return; // 旧连接回调一律丢弃
+      handleRealtimeMessage(message);
+    },
+    onStateChange: (payload) => {
+      if (generation !== realtime.generation) return;
+      handleRealtimeState(payload);
+    },
+  });
+  realtime.channel = channel;
+  realtime.mode = "connecting";
+  channel.start(subscriptionIds());
+  startRealtimeTimeoutWatch();
+  // 首帧到达前先保证有数据（WS 失败时轮询会继续，live 后由 handleRealtimeState 停掉）。
+  startFallbackPolling();
+  if (reason !== "init") console.info("[CFSM Butterfly] realtime restarted", { reason });
+}
 const app = document.querySelector("#app");
 const globePortal = document.querySelector("#globe-portal");
 let regionGlobeController = null;
@@ -3624,6 +3824,8 @@ function applyServersPayload(payload) {
   state.connected = true;
   state.lastUpdated = Date.now();
   updateSamples();
+  // 快照后刷新订阅集合（节点增删/可见性变化时同一连接重发 subscribe）。
+  realtime.channel?.setIds(subscriptionIds());
   return mapped;
 }
 
@@ -3661,23 +3863,24 @@ async function refreshStatuses(manual = false) {
   }
 }
 
-// 轮询由 cfsm-api 的 poller 负责：页面不可见暂停，恢复可见先立即拉一次，失败按 2 的幂退避。
+// 时钟与降级轮询的启停；实时链路的生命周期由 handleVisibilityChange 统一编排。
 function startTimers() {
   stopTimers();
   if (document.hidden) return;
-  statusPoller.start();
   state.clockTimer = setInterval(updateLiveElements, 1000);
 }
 
 function stopTimers() {
-  statusPoller.stop();
+  stopFallbackPolling();
   clearInterval(state.clockTimer);
   state.pollTimer = null;
   state.clockTimer = null;
 }
 
+// 可见性：隐藏时关闭 WS 与轮询（服务端可见连接数随之下降），恢复可见先补一次快照再重建 WS。
 function handleVisibilityChange() {
   if (document.hidden) {
+    stopRealtimeChannel();
     stopTimers();
     if (mobileStatusRenderTimer !== null) {
       clearTimeout(mobileStatusRenderTimer);
@@ -3687,8 +3890,19 @@ function handleVisibilityChange() {
   }
   if (state.loading || state.error) return;
   updateLiveElements();
-  // poller 在可见性恢复时会立即执行一次；这里重新起表并由它接管排程。
-  startTimers();
+  void resumeRealtime();
+}
+
+async function resumeRealtime() {
+  // 先起轮询保证有数据，再尝试 WS；顺序反了会出现"恢复可见后空白等首帧"。
+  startFallbackPolling();
+  try {
+    await refreshStatuses(false);
+  } catch {
+    // 失败交给轮询退避处理
+  }
+  if (document.hidden) return;
+  startRealtime("visible");
 }
 
 async function initialize() {
@@ -3706,6 +3920,7 @@ async function initialize() {
     applyHashRoute();
     if (new URLSearchParams(location.search).get("globe") === "1") openGlobe();
     startTimers();
+    startRealtime("init");
   } catch (error) {
     console.error("[CFSM Butterfly] initialization failed", error);
     state.loading = false;

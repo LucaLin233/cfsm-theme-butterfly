@@ -39,6 +39,7 @@ const requiredDistFiles = [
   "assets/world-data.js",
   "assets/cfsm-api.js",
   "assets/cfsm-map.js",
+  "assets/cfsm-realtime.js",
   "assets/theme-config.js",
 ];
 for (const relative of requiredDistFiles) {
@@ -92,6 +93,12 @@ if (/(?:src|href)=["']https?:\/\//i.test(indexHtml)) errors.push("dist/index.htm
 if (indexHtml.includes("favicon.svg")) errors.push("dist/index.html must not reference favicon.svg");
 if (indexHtml.includes("__THEME_VERSION__")) errors.push("dist/index.html still contains an unreplaced version token");
 if (appSource.includes("__THEME_VERSION__")) errors.push("dist/assets/app.js still contains an unreplaced version token");
+// 所有主题模块都不得残留构建标记：遗漏会让模块间导入退回字面量 URL（缓存与一致性都失控）。
+for (const name of await readdir(resolve(distDir, "assets"))) {
+  if (!name.endsWith(".js")) continue;
+  const source = await readIfExists(resolve(distDir, "assets", name), `dist/assets/${name}`);
+  if (source.includes("__THEME_VERSION__")) errors.push(`dist/assets/${name} still contains an unreplaced version token`);
+}
 if (!appSource.includes(`const THEME_VERSION = "${version}"`)) {
   errors.push("dist/assets/app.js version does not match package.json");
 }

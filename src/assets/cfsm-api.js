@@ -103,11 +103,15 @@ export class CfsmApi {
       clearTimeout(timer);
     }
 
-    if (response.status === 401 || response.status === 403) {
+    // 401 = 令牌无效/过期：清除本地令牌并提示重新登录。
+    if (response.status === 401) {
       clearStoredToken();
       this.onUnauthorized?.();
-      throw new CfsmApiError("登录状态已失效", { status: response.status, path });
+      throw new CfsmApiError("登录状态已失效", { status: 401, path });
     }
+    // 403 = 携带的令牌被拒（未授权、Turnstile、Origin 限制）：**不清除令牌**——
+    // 清掉等于误登出，而且对 Turnstile 站点毫无帮助（该状态下所有 `/api/*` 都需要校验头）。
+    // 落到下面的统一错误分支，仍然透出服务端错误码。
     if (!response.ok) {
       // CFSM 的错误体是 { error: "invalidThemeOptionsFormat" } 这类代码，优先透出它
       let code = "";
@@ -175,13 +179,13 @@ export function isTurnstileBlocking(config) {
   return config?.turnstile_enabled === true;
 }
 
-// 轮询调度：默认 30 秒（可配置），页面不可见时暂停，恢复可见先立即拉一次；
-// 连续失败按 2 的幂退避，上限 120 秒。`onTick` 抛错即视为失败。
+// 轮询调度：默认 30 秒（可配置），连续失败按 2 的幂退避，上限 120 秒；`onTick` 抛错即视为失败。
+// 可见性与通道选择由调用方（app.js 的实时编排）负责——本函数只按 start/stop 运行，
+// 避免与实时链路争夺同一事件，出现"隐藏后仍在轮询"的双通道。
 export function createPoller({
   getIntervalSeconds,
   onTick,
   onError = null,
-  target = typeof document === "undefined" ? null : document,
   maxBackoffSeconds = 120,
 } = {}) {
   let timer = null;
@@ -211,14 +215,12 @@ export function createPoller({
   const schedule = (failed = false) => {
     clear();
     if (stopped) return;
-    if (target?.hidden) return; // 页面不可见：不排程，等 visibilitychange
     timer = setTimeout(() => void run(), delayFor(failed));
   };
 
   async function run() {
     clear();
     if (stopped || inFlight) return;
-    if (target?.hidden) return;
     inFlight = true;
     let failed = false;
     try {
@@ -234,27 +236,16 @@ export function createPoller({
     }
   }
 
-  const onVisibilityChange = () => {
-    if (stopped) return;
-    if (target?.hidden) {
-      clear();
-      return;
-    }
-    void run();
-  };
-
   return {
     start() {
       if (!stopped) return;
       stopped = false;
       backoffStep = 0;
-      target?.addEventListener?.("visibilitychange", onVisibilityChange);
-      if (!target?.hidden) schedule(false);
+      schedule(false);
     },
     stop() {
       stopped = true;
       clear();
-      target?.removeEventListener?.("visibilitychange", onVisibilityChange);
     },
     // 恢复可见/手动刷新时的立即执行入口。
     refreshNow() {

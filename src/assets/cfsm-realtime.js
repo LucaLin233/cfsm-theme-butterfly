@@ -1,0 +1,411 @@
+// CF-Server-Monitor 实时链路（`/api/ws`）协议层。
+//
+// 分工：本模块只做协议与状态机（URL 构造、消息解析、ids 校验、增量合并、连接状态机），
+// 不碰 DOM 与全局状态；编排（何时建连、何时降级轮询）在 app.js。
+// 依据：官方 `theme-develop.md` 与 `API.md`（v2.8.5）——`subscribe=all` 默认不推送，
+// 必须显式发送 `{type:"subscribe", scope:"all", ids}`；非法 scope/ids 以关闭码 1008 断开。
+import { mapStatus } from "./cfsm-map.js?v=__THEME_VERSION__";
+
+// 服务端约束（API.md）：ids ≤ 500 个，单个 id 长度 1–64，字符集 [A-Za-z0-9._:-]。
+export const REALTIME_LIMITS = Object.freeze({
+  maxIds: 500,
+  minIdLength: 1,
+  maxIdLength: 64,
+  idPattern: /^[A-Za-z0-9._:-]+$/,
+});
+
+export const DEFAULT_SUBSCRIBE_SCOPE = "all";
+
+// status 字段 ← 原始样本键。样本只带自己有的键，因此合并时**只更新样本确实提供的字段**，
+// 缺失键一律沿用旧值（服务端的实时样本不是完整报告）。
+const FIELD_SOURCES = Object.freeze({
+  client: ["id"],
+  cpu: ["cpu"],
+  ram: ["ram_used"],
+  ram_total: ["ram_total"],
+  swap: ["swap_used"],
+  swap_total: ["swap_total"],
+  disk: ["disk_used"],
+  disk_total: ["disk_total"],
+  load: ["load_avg"],
+  load5: ["load_avg"],
+  load15: ["load_avg"],
+  // 方向交叉见 cfsm-map.js 文件头：net_in = 上传 ← net_out_speed。
+  net_in: ["net_out_speed"],
+  net_out: ["net_in_speed"],
+  net_total_up: ["net_tx_monthly"],
+  net_total_down: ["net_rx_monthly"],
+  process: ["processes"],
+  connections: ["tcp_conn", "udp_conn"],
+  connections_udp: ["udp_conn"],
+  uptime: ["boot_time"],
+  ping: ["ping"],
+  cfsm_net_rx: ["net_rx"],
+  cfsm_net_tx: ["net_tx"],
+  cfsm_net_rx_monthly: ["net_rx_monthly"],
+  cfsm_net_tx_monthly: ["net_tx_monthly"],
+  cfsm_disk: ["disk"],
+  cfsm_boot_time: ["boot_time"],
+});
+
+// 报告级字段（随周期性报告上报，可能不在每个实时样本里）：样本未提供时必须保留旧值，
+// 绝不能因为"这个样本里没有"就当作已清除。
+const REPORT_LEVEL_SOURCES = Object.freeze({
+  ping: ["ping"],
+  cfsm_disk: ["disk"],
+  disk: ["disk_used"],
+  disk_total: ["disk_total"],
+  ram_total: ["ram_total"],
+  swap_total: ["swap_total"],
+  uptime: ["boot_time"],
+  cfsm_boot_time: ["boot_time"],
+});
+const LINE_SOURCES = Object.freeze(["ping_", "loss_"]);
+
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasAnyKey(data, keys) {
+  for (const key of Object.keys(data)) {
+    for (const prefix of keys) {
+      if (key === prefix || key.startsWith(prefix)) return true;
+    }
+  }
+  return false;
+}
+
+// 校验订阅 id 列表：去重、逐条校验长度与字符集，超限即判定为非法（服务端会以 1008 断开）。
+export function normalizeIds(input) {
+  const list = Array.isArray(input) ? input : [];
+  const ids = [];
+  const seen = new Set();
+  const rejected = [];
+  for (const raw of list) {
+    const id = typeof raw === "string" ? raw : "";
+    if (!id || id.length < REALTIME_LIMITS.minIdLength || id.length > REALTIME_LIMITS.maxIdLength || !REALTIME_LIMITS.idPattern.test(id)) {
+      if (id) rejected.push(id);
+      continue;
+    }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  const overflow = ids.length > REALTIME_LIMITS.maxIds;
+  return {
+    ok: !overflow && rejected.length === 0,
+    ids: overflow ? ids.slice(0, REALTIME_LIMITS.maxIds) : ids,
+    rejected,
+    overflow,
+  };
+}
+
+// `/api/ws?subscribe=...`：同源走页面协议（https→wss）；私有站点另可用查询参数传 token。
+// 同源且存在 token 时也附带参数：`cfsm_auth` Cookie 是 HttpOnly，脚本无法判断它是否存在。
+export function buildWsUrl(base, { subscribe = DEFAULT_SUBSCRIBE_SCOPE, token = "" } = {}) {
+  const fallback = typeof location === "undefined" ? "http://localhost" : location.origin;
+  const url = new URL("/api/ws", base || fallback);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  if (subscribe) url.searchParams.set("subscribe", subscribe);
+  if (token) url.searchParams.set("token", token);
+  return url.toString();
+}
+
+// 服务端消息：`hello` / `subscribed` / `batchUpdate` / `pong`。
+export function parseRealtimeMessage(raw) {
+  if (isRecord(raw)) return raw;
+  if (typeof raw !== "string" || !raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function samplePayload(sample) {
+  if (!isRecord(sample)) return null;
+  for (const key of ["data", "payload", "metrics"]) {
+    const value = sample[key];
+    if (isRecord(value)) return value;
+    if (typeof value === "string" && value) {
+      try {
+        const parsed = JSON.parse(value);
+        if (isRecord(parsed)) return parsed;
+      } catch {
+        // 非 JSON 的字段值：继续尝试下一个候选键
+      }
+    }
+  }
+  return null;
+}
+
+// `{type:"batchUpdate", ts, updates:[{serverId, samples:[{ts, data}]}]}` → 扁平样本列表。
+export function extractSamples(message) {
+  const parsed = parseRealtimeMessage(message);
+  if (!parsed || parsed.type !== "batchUpdate" || !Array.isArray(parsed.updates)) return [];
+  const samples = [];
+  for (const update of parsed.updates) {
+    if (!isRecord(update)) continue;
+    const serverId = typeof update.serverId === "string" ? update.serverId : "";
+    if (!serverId || !Array.isArray(update.samples)) continue;
+    for (const sample of update.samples) {
+      const data = samplePayload(sample);
+      if (!data) continue;
+      const ts = Number(sample?.ts);
+      samples.push({ serverId, ts: Number.isFinite(ts) && ts > 0 ? ts : null, data });
+    }
+  }
+  return samples;
+}
+
+function mergeLineValues(previous, incoming) {
+  const merged = { ...(previous || {}) };
+  for (const [lineId, value] of Object.entries(incoming || {})) {
+    if (!isRecord(value)) continue;
+    const patch = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (item !== null && item !== undefined) patch[key] = item;
+    }
+    merged[lineId] = { ...(merged[lineId] || {}), ...patch };
+  }
+  return merged;
+}
+
+// 把一个实时样本合并进已有 status：样本提供的字段更新，未提供的沿用旧值。
+// 首次（无旧值）时直接采用 mapStatus 的结果。
+export function mergeStatusUpdate(previous, data, { sources = [], now = Date.now(), id = "" } = {}) {
+  if (!isRecord(data)) return previous || null;
+  const rawId = typeof data.id === "string" && data.id ? data.id : id || previous?.client || "";
+  if (!rawId) return previous || null;
+  const incoming = mapStatus({ id: rawId, ...data }, { sources, now });
+  if (!incoming) return previous || null;
+  if (!previous) {
+    const reportAt = hasAnyKey(data, Object.values(REPORT_LEVEL_SOURCES).flat().concat(LINE_SOURCES)) ? now : 0;
+    const created = { ...incoming, cfsm_report_at: reportAt };
+    // 收到实时样本即在线证据：样本不带时间字段时不要被判离线。
+    const hasTimestamp = Number.isFinite(Number(data.last_updated)) || Number.isFinite(Number(data.timestamp));
+    if (!hasTimestamp) created.online = true;
+    if (incoming.time === null) created.time = now;
+    if (incoming.cfsm_updated === null) created.cfsm_updated = now;
+    return created;
+  }
+
+  const merged = { ...incoming };
+  for (const [field, keys] of Object.entries(FIELD_SOURCES)) {
+    if (!hasAnyKey(data, keys)) merged[field] = previous[field];
+  }
+  for (const [field, keys] of Object.entries(REPORT_LEVEL_SOURCES)) {
+    if (!hasAnyKey(data, keys)) merged[field] = previous[field];
+  }
+  merged.cfsm_line_values = hasAnyKey(data, LINE_SOURCES)
+    ? mergeLineValues(previous.cfsm_line_values, incoming.cfsm_line_values)
+    : previous.cfsm_line_values;
+
+  // 收到实时样本本身就是在线证据：样本不带 last_updated 时不要因缺字段被判离线。
+  const hasTimestamp = Number.isFinite(Number(data.last_updated)) || Number.isFinite(Number(data.timestamp));
+  merged.online = hasTimestamp ? incoming.online : true;
+
+  const sampleTime = Number(data.last_updated ?? data.timestamp);
+  merged.time = Number.isFinite(sampleTime) && sampleTime > 0 ? sampleTime : previous.time ?? null;
+  merged.cfsm_updated = merged.time;
+  merged.cfsm_report_at = hasAnyKey(data, Object.values(REPORT_LEVEL_SOURCES).flat().concat(LINE_SOURCES))
+    ? now
+    : previous.cfsm_report_at || 0;
+  return merged;
+}
+
+// 报告级字段过期判定：超过 staleAfter 未再出现即视为「未知」（调用方决定如何展示）。
+export function isReportStale(status, { now = Date.now(), staleAfterMs = 0 } = {}) {
+  if (!staleAfterMs) return false;
+  const at = Number(status?.cfsm_report_at);
+  if (!Number.isFinite(at) || at <= 0) return false;
+  return now - at > staleAfterMs;
+}
+
+// 连接状态机：idle → connecting → socket-open → subscription-pending → live；
+// 异常关闭按指数退避重连（1s → 30s，±20% 抖动），关闭码 1008（非法 scope/ids）为终止态。
+export function createRealtimeChannel({
+  url,
+  WebSocketCtor = typeof WebSocket === "undefined" ? null : WebSocket,
+  onMessage = null,
+  onStateChange = null,
+  subscribeScope = DEFAULT_SUBSCRIBE_SCOPE,
+  subscribeTimeoutMs = 8000,
+  backoffMinMs = 1000,
+  backoffMaxMs = 30000,
+  random = Math.random,
+  setTimeoutImpl = (fn, ms) => setTimeout(fn, ms),
+  clearTimeoutImpl = (handle) => clearTimeout(handle),
+} = {}) {
+  let socket = null;
+  let state = "idle";
+  let attempt = 0;
+  let reconnectTimer = null;
+  let subscribeTimer = null;
+  let stopped = true;
+  let ids = [];
+  let fatalCode = 0;
+
+  const emit = (next, extra = {}) => {
+    state = next;
+    onStateChange?.({ state: next, ...extra });
+  };
+
+  const clearSubscribeTimer = () => {
+    if (subscribeTimer !== null) {
+      clearTimeoutImpl(subscribeTimer);
+      subscribeTimer = null;
+    }
+  };
+
+  const send = (payload) => {
+    if (!socket || socket.readyState !== 1) return false;
+    try {
+      socket.send(JSON.stringify(payload));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const sendSubscribe = () => {
+    emit("subscription-pending");
+    send({ type: "subscribe", scope: subscribeScope, ids });
+    clearSubscribeTimer();
+    subscribeTimer = setTimeoutImpl(() => {
+      subscribeTimer = null;
+      if (stopped || state === "live") return;
+      // 订阅确认超时：当作本次连接失败，走退避重连。
+      try {
+        socket?.close(4000);
+      } catch {
+        // 关闭失败时由 onclose 兜底
+      }
+    }, subscribeTimeoutMs);
+  };
+
+  const scheduleReconnect = (code = 0) => {
+    attempt += 1;
+    const step = Math.min(attempt - 1, 6);
+    const capped = Math.min(backoffMinMs * 2 ** step, backoffMaxMs);
+    const delay = Math.round(capped * (0.8 + random() * 0.4));
+    emit("closed", { attempt, code });
+    reconnectTimer = setTimeoutImpl(() => {
+      reconnectTimer = null;
+      connect();
+    }, delay);
+  };
+
+  function connect() {
+    if (stopped) return;
+    if (!WebSocketCtor) {
+      emit("fatal", { reason: "unsupported", code: 0 });
+      return;
+    }
+    emit("connecting", { attempt });
+    let ws;
+    try {
+      ws = new WebSocketCtor(url);
+    } catch (error) {
+      scheduleReconnect(0);
+      return;
+    }
+    socket = ws;
+    ws.onopen = () => {
+      if (stopped) {
+        try {
+          ws.close();
+        } catch {
+          // 忽略
+        }
+        return;
+      }
+      emit("socket-open");
+      sendSubscribe();
+    };
+    ws.onmessage = (event) => {
+      const message = parseRealtimeMessage(event?.data);
+      if (!message) return;
+      if (message.type === "subscribed") {
+        clearSubscribeTimer();
+        attempt = 0;
+        emit("live");
+        return;
+      }
+      // 只透传增量批次：其余（hello / pong 等）由本模块自行消化。
+      if (message.type === "batchUpdate") onMessage?.(message);
+    };
+    ws.onerror = () => {
+      // 具体原因由随后的 onclose 给出（浏览器不暴露 HTTP 状态码）。
+    };
+    ws.onclose = (event) => {
+      clearSubscribeTimer();
+      socket = null;
+      if (stopped) {
+        emit("idle");
+        return;
+      }
+      const code = Number(event?.code) || 0;
+      if (code === 1008) {
+        fatalCode = code;
+        emit("fatal", { code, reason: "invalid-subscription" });
+        return;
+      }
+      scheduleReconnect(code);
+    };
+  }
+
+  return {
+    start(nextIds) {
+      if (Array.isArray(nextIds)) ids = nextIds;
+      if (!stopped) return;
+      stopped = false;
+      attempt = 0;
+      connect();
+    },
+    stop() {
+      const wasRunning = !stopped;
+      stopped = true;
+      clearSubscribeTimer();
+      if (reconnectTimer !== null) {
+        clearTimeoutImpl(reconnectTimer);
+        reconnectTimer = null;
+      }
+      const ws = socket;
+      socket = null;
+      if (ws) {
+        try {
+          ws.onclose = null;
+          ws.onerror = null;
+          ws.close(1000);
+        } catch {
+          // 忽略
+        }
+      }
+      // 幂等：重复 stop 不再触发状态回调。
+      if (!wasRunning) return;
+      emit("idle", { reason: "stopped" });
+    },
+    // 快照更新后在同一连接上重发订阅（服务端按连接维护订阅集合）。
+    setIds(nextIds) {
+      ids = Array.isArray(nextIds) ? nextIds : [];
+      if (socket && socket.readyState === 1) sendSubscribe();
+    },
+    getIds() {
+      return [...ids];
+    },
+    isLive() {
+      return state === "live";
+    },
+    get state() {
+      return state;
+    },
+    get attempt() {
+      return attempt;
+    },
+    get fatalCode() {
+      return fatalCode;
+    },
+  };
+}
