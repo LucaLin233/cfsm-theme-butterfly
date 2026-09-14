@@ -2768,7 +2768,7 @@ function filteredNodes() {
   });
 
   const offlinePosition = state.config.offline_position;
-  return nodes.sort((a, b) => {
+  const sorted = nodes.sort((a, b) => {
     const aOnline = nodeIsOnline(a.uuid);
     const bOnline = nodeIsOnline(b.uuid);
     if (offlinePosition !== "keep" && aOnline !== bOnline) {
@@ -2789,6 +2789,35 @@ function filteredNodes() {
     // 与上游 Komari 的 weight（越大越靠前）方向相反，故此处按升序排列。
     return finiteNumber(a.weight) - finiteNumber(b.weight);
   });
+  return freezeDynamicOrder(sorted);
+}
+
+// 批次 5.2：动态排序（latency / traffic）下的顺序冻结。
+// 延迟与流量随实时数据波动 → 若每批次都按它们重排，节点顺序会持续变化，结构签名随之每批次变化，
+// 补丁层将永远回落到整页重建。故：动态排序时顺序**冻结到显式用户操作**，实时批次只改数值，
+// 顺序由本函数按 ORDER_FREEZE_MS 节流刷新；节点集合或在线态变化时立即重排（属真实结构事件）。
+// 依据：上游作者「原皮就改数字而已」；见 PLAN-5.0-v3 §3.1 与 v4/v5 增量。
+const ORDER_FREEZE_MS = 30000;
+let frozenOrder = { ids: null, at: 0, membership: "" };
+
+function freezeDynamicOrder(sorted) {
+  const dynamic = state.sort === "latency" || state.sort === "traffic";
+  if (!dynamic) {
+    frozenOrder = { ids: null, at: 0, membership: "" };
+    return sorted;
+  }
+  const now = Date.now();
+  const ids = sorted.map((node) => node.uuid);
+  // 成员键含在线态：离线置顶/沉底规则会让顺序因在线态变化而变，故在线态变化必须立即重排
+  const membership = sorted.map((node) => `${node.uuid}:${nodeIsOnline(node.uuid) ? 1 : 0}`).sort().join(",");
+  if (!frozenOrder.ids || now - frozenOrder.at >= ORDER_FREEZE_MS || frozenOrder.membership !== membership) {
+    frozenOrder = { ids, at: now, membership };
+    return sorted;
+  }
+  const byId = new Map(sorted.map((node) => [node.uuid, node]));
+  const frozen = frozenOrder.ids.map((id) => byId.get(id)).filter(Boolean);
+  // 冻结名单与当前集合不一致（极端情况）→ 以最新为准，避免丢节点
+  return frozen.length === ids.length ? frozen : sorted;
 }
 
 function renderNodeGrid() {
