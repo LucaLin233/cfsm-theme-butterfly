@@ -1475,7 +1475,7 @@ svg {
   stroke-dasharray: 5 7;
   opacity: 0.88;
   filter: drop-shadow(0 0 2.5px rgba(80, 235, 225, 0.46));
-  animation: arc-flow 11s linear infinite;
+  /* 批次 5.1：装饰性持续动画已停用（作者反馈持续动画耗费浏览器资源） */
 }
 
 .network-art .arc-major {

@@ -1,15 +1,15 @@
-import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.7.4";
-import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking, readStoredToken } from "./cfsm-api.js?v=0.7.4";
-import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportGroupStale, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=0.7.4";
-import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.7.4";
-import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=0.7.4";
+import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.8.0";
+import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking, readStoredToken } from "./cfsm-api.js?v=0.8.0";
+import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportGroupStale, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=0.8.0";
+import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.8.0";
+import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=0.8.0";
 
 const DEG_TO_RAD = Math.PI / 180;
 let worldLandVectorsPromise = null;
 
 function loadWorldLandVectors() {
   if (!worldLandVectorsPromise) {
-    worldLandVectorsPromise = import("./world-data.js?v=0.7.4")
+    worldLandVectorsPromise = import("./world-data.js?v=0.8.0")
       .then(({ WORLD_LAND_POINTS }) => Object.freeze(WORLD_LAND_POINTS.map(([longitude, latitude]) => {
         const lat = latitude * DEG_TO_RAD;
         const lng = longitude * DEG_TO_RAD;
@@ -24,7 +24,7 @@ function loadWorldLandVectors() {
   return worldLandVectorsPromise;
 }
 
-const THEME_VERSION = "0.7.4";
+const THEME_VERSION = "0.8.0";
 // 移植版仓库；上游原主题为 TomorrowX6/Komari-Butterfly（MIT，署名见 README）。
 const THEME_REPOSITORY = "https://github.com/LucaLin233/cfsm-theme-butterfly";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
@@ -2357,17 +2357,6 @@ function areaPath(values, width = 120, height = 48, fixedMax = null) {
   return `M ${list.join(" L ")} L ${width - 3},${height - 2} L 3,${height - 2} Z`;
 }
 
-function lineChart(values, className = "node-sparkline", width = 120, height = 80, fixedMax = 100) {
-  const source = values.length ? values : [0, 0];
-  const points = sparklinePoints(source, width, height, 4, fixedMax);
-  const last = points.split(" ").at(-1).split(",");
-  return `<svg class="${className}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
-    <path class="area" d="${areaPath(source, width, height, fixedMax)}"/>
-    <polyline class="line" points="${points}"/>
-    <circle class="last-dot" cx="${last[0]}" cy="${last[1]}" r="2.8"/>
-  </svg>`;
-}
-
 function dualLineChart(first, second, width = 620, height = 130) {
   const all = [...first, ...second];
   const maximum = Math.max(...all, 1);
@@ -2617,7 +2606,7 @@ function renderStatusRibbon(metrics) {
     <article class="metric-card"><div class="metric-card-inner-split"><div><div class="metric-card-title">${escapeHtml(t("onlineNodes"))}</div><div class="metric-card-value">${escapeHtml(onlineLabel)}</div><div class="metric-card-foot">${escapeHtml(`${Math.round(metrics.onlineRate)}% ${t("online")}`)}</div></div>${radialRing(metrics.onlineRate)}</div></article>
     <article class="metric-card" style="--metric-glow:rgba(83,100,244,.10)"><div class="metric-card-title">${escapeHtml(t("regionsMetric"))}</div><div class="metric-card-value">${metrics.regions}</div><div class="metric-card-foot">${icon("globe", 13)} ${escapeHtml(t("globalCoverage"))}</div></article>
     <article class="metric-card" style="--metric-glow:var(--green-soft)"><div class="metric-card-title">${escapeHtml(t("totalTraffic"))}</div><div class="metric-dual"><div class="metric-dual-row"><span class="direction">↑</span>${escapeHtml(formatBytes(metrics.totalUpload))}</div><div class="metric-dual-row"><span class="direction">↓</span>${escapeHtml(formatBytes(metrics.totalDownload))}</div></div></article>
-    <article class="metric-card" style="--metric-glow:rgba(56,191,193,.12)"><div class="metric-card-title">${escapeHtml(t("networkSpeed"))}</div><div class="metric-dual"><div class="metric-dual-row"><span class="direction">↑</span>${escapeHtml(formatRate(metrics.uploadRate))}</div><div class="metric-dual-row"><span class="direction">↓</span>${escapeHtml(formatRate(metrics.downloadRate))}</div></div>${samples.length ? `<svg class="metric-sparkline" viewBox="0 0 120 39" preserveAspectRatio="none" aria-hidden="true"><path class="area" d="${areaPath(samples, 120, 39)}"/><polyline class="line" points="${sparklinePoints(samples, 120, 39)}"/></svg>` : ""}</article>
+    <article class="metric-card" style="--metric-glow:rgba(56,191,193,.12)"><div class="metric-card-title">${escapeHtml(t("networkSpeed"))}</div><div class="metric-dual"><div class="metric-dual-row"><span class="direction">↑</span>${escapeHtml(formatRate(metrics.uploadRate))}</div><div class="metric-dual-row"><span class="direction">↓</span>${escapeHtml(formatRate(metrics.downloadRate))}</div></div></article>
   </section>`;
 }
 
@@ -2807,7 +2796,6 @@ function renderNodeCard(node, index) {
     <button class="favorite-button${favorite ? " is-active" : ""}" type="button" data-favorite-uuid="${escapeHtml(node.uuid)}" aria-label="${escapeHtml(t("favorites"))}">${icon("favorites", 16)}</button>
     <div class="node-main">
       <div class="node-meters">${meter(t("cpu"), cpu)}${meter(t("memory"), memory)}${meter(t("disk"), diskStale ? null : disk, disk > 82 ? "var(--red)" : undefined)}</div>
-      ${lineChart(samples)}
     </div>
     ${protocolTags ? `<div class="ip-tags">${protocolTags}</div>` : ""}
     ${renderRemainingTraffic(node)}
