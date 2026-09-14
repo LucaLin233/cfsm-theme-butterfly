@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
@@ -14,7 +14,17 @@ if (typeof version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.tes
 
 await rm(outputDir, { recursive: true, force: true });
 await mkdir(outputDir, { recursive: true });
-await cp(sourceDir, outputDir, { recursive: true });
+// 逐文件递归复制：不依赖 `fs.cp`（部分环境/沙箱下不可用）。
+async function copyDir(source, target) {
+  await mkdir(target, { recursive: true });
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    const from = resolve(source, entry.name);
+    const to = resolve(target, entry.name);
+    if (entry.isDirectory()) await copyDir(from, to);
+    else await writeFile(to, await readFile(from));
+  }
+}
+await copyDir(sourceDir, outputDir);
 
 // dist/ 下所有带版本查询串的资源都由这里注入：CFSM 对主题静态资源下发
 // `Cache-Control: public, max-age=31536000, immutable`，URL 固定为 /assets/app.js

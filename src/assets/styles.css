@@ -6542,6 +6542,36 @@ svg {
   gap: 24px;
 }
 
+.traffic-range {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.traffic-range-button {
+  padding: 3px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: calc(11px * var(--text-scale));
+  font-weight: 680;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.traffic-range-button:hover {
+  color: var(--text-strong);
+  border-color: var(--line-strong);
+}
+
+.traffic-range-button.is-active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .traffic-dashboard-title {
   color: var(--text-strong);
   font-size: calc(15px * var(--text-scale));

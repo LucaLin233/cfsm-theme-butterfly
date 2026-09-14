@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.3 — 2026-09-14（CF-Server-Monitor 移植版）
+
+- 修正节点排序方向：CFSM 的 `sort_order` 语义是「越小越靠前」（`/api/servers` 按 `sort_order ASC` 返回），
+  而移植版沿用了上游 Komari 的 `weight` 降序，方向相反。现在默认排序为升序。
+- 流量视图：默认档位由 24 小时改为 **6 小时**，并提供 6h / 24h 显式切换；历史缓存与加载态按档位隔离。
+  依据：服务端返回点数固定（`long_history_points`），客户端体积与档位无关，随档位增长的是服务端 D1 的扫描范围。
+- 修正 `cfsm-api.js` 中关于 Turnstile 的注释：**全局** Turnstile 覆盖**所有 `/api/*`**
+  （bypass 仅 `/api/config` 不带该 Header 时、`/api/ws`、`/admin/api`），不只是写接口。
+  本移植版不实现 Turnstile 凭证链，启用全局 Turnstile 的站点上主题不可用。
+- 新增 `npm test`（`scripts/test-modules.mjs`）并接入 CI 与 `npm run check`：
+  覆盖设置默认值/归一化、字段映射、以及排序方向与流量默认档位的源码级断言。
+
+## 上游版本（Komari-Butterfly）
+
 ## 1.5.0 — 2026-09-03
 
 - Reduced mobile scrolling cost by removing large blurred background layers, disabling nonessential off-screen animation, and deferring status-driven DOM refreshes until scrolling becomes idle.

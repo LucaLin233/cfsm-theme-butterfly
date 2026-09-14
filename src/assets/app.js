@@ -29,8 +29,17 @@ const THEME_REPOSITORY = "https://github.com/LucaLin233/cfsm-theme-butterfly";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
 const MOBILE_GLOBE_QUERY = "(max-width: 680px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
 const MOBILE_STATUS_RENDER_IDLE_MS = 180;
-// 流量视图与累计曲线取 24 小时；`/api/history/all` 只接受离散档位，由 cfsm-api 收敛。
-const TRAFFIC_HISTORY_HOURS = 24;
+// 流量视图默认档位：6 小时。`/api/history/all` 只接受离散档位（由 cfsm-api 收敛），
+// 且服务端返回点数固定（long_history_points，默认 120），因此客户端体积与档位无关，
+// 真正随档位增长的是服务端 D1 的扫描范围 —— 默认取更小的档位以降低查询放大。
+const TRAFFIC_DEFAULT_HOURS = 6;
+const TRAFFIC_HOURS_OPTIONS = Object.freeze([6, 24]);
+const TRAFFIC_CACHE_TTL_MS = 5 * 60 * 1000;
+// 「空窗口节点跳过」：默认**关闭**。开启前必须实测确认「被判定的节点在同一窗口确实返回空」，
+// 因为本地状态可能滞后（WS 丢包、快照与历史请求竞态），仅凭本地时间戳无法证明历史为空。
+const TRAFFIC_SKIP_STALE = false;
+// 启用该优化时要求本地状态足够新鲜：超过此时长未更新过状态则一律照常请求。
+const TRAFFIC_STALE_STATE_MAX_MS = 10 * 60 * 1000;
 // 深链接路由：#/ 与 #/server/<id>（管理入口仍是站点自身的 /admin#admin）
 const HASH_SERVER_PREFIX = "#/server/";
 // 文字缩放（作用于 CSS 变量 --text-scale，见 styles.css 末尾）。
@@ -196,7 +205,8 @@ const STRINGS = {
     avgLatencyShort: "平均延迟",
     trafficOverview: "实时网络流量",
     trafficCopy: "根据各在线节点的当前上传与下载速率汇总。",
-    recent24hTraffic: "最近24小时流量",
+    trafficRangeTitle: "最近 {hours} 小时流量",
+    trafficRangeLabel: "统计范围",
     trafficWindow: "汇总各节点近期网络记录",
     cumulativeUpload: "累计上传",
     cumulativeDownload: "累计下载",
@@ -386,7 +396,8 @@ const STRINGS = {
     avgLatencyShort: "Avg. latency",
     trafficOverview: "Live network traffic",
     trafficCopy: "Aggregated from the current upload and download rates of online nodes.",
-    recent24hTraffic: "Traffic in the last 24 hours",
+    trafficRangeTitle: "Traffic in the last {hours} hours",
+    trafficRangeLabel: "Time range",
     trafficWindow: "Recent network records aggregated across nodes",
     cumulativeUpload: "Total upload",
     cumulativeDownload: "Total download",
@@ -576,7 +587,8 @@ const STRINGS = {
     avgLatencyShort: "平均遅延",
     trafficOverview: "リアルタイム通信量",
     trafficCopy: "オンラインノードの現在の送受信速度を集計します。",
-    recent24hTraffic: "直近24時間の通信量",
+    trafficRangeTitle: "直近 {hours} 時間の通信量",
+    trafficRangeLabel: "集計範囲",
     trafficWindow: "各ノードの最近の通信記録を集計",
     cumulativeUpload: "累計アップロード",
     cumulativeDownload: "累計ダウンロード",
@@ -793,9 +805,13 @@ const state = {
   statuses: {},
   nodeSamples: new Map(),
   networkSamples: [],
+  trafficHours: TRAFFIC_DEFAULT_HOURS,
   trafficHistory: new Map(),
-  trafficHistoryLoading: false,
+  trafficHistoryLoadingByHours: new Set(),
   trafficHistoryLoadedAt: 0,
+  // 按档位隔离的历史缓存：`${hours}` → { map, loadedAt }，避免切换档位时复用错档数据。
+  trafficHistoryCache: new Map(),
+  trafficHistorySkipped: 0,
   loading: true,
   error: null,
   connected: false,
@@ -2346,8 +2362,9 @@ function filteredNodes() {
       const bStatus = nodeStatus(b.uuid) || {};
       return (finiteNumber(bStatus.net_in) + finiteNumber(bStatus.net_out)) - (finiteNumber(aStatus.net_in) + finiteNumber(aStatus.net_out));
     }
-    // 原主题按 weight 排序；CFSM 用 sort_order 填充 node.weight，保持同一路径
-    return finiteNumber(b.weight) - finiteNumber(a.weight);
+    // CFSM 的 sort_order 语义是「越小越靠前」（`/api/servers` 按 sort_order ASC 返回），
+    // 与上游 Komari 的 weight（越大越靠前）方向相反，故此处按升序排列。
+    return finiteNumber(a.weight) - finiteNumber(b.weight);
   });
 }
 
@@ -2605,7 +2622,7 @@ function renderTrafficChart(series, metrics) {
   return `<div class="traffic-chart-frame">
     <div class="traffic-y-axis traffic-y-axis-left">${trafficAxisLabels(rateMaximum, value => formatRate(value))}</div>
     <div class="traffic-plot">
-      <svg viewBox="0 0 1000 240" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(t("recent24hTraffic"))}">
+      <svg viewBox="0 0 1000 240" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(trafficRangeTitle())}">
         <path class="traffic-download-area" d="${trafficAreaPath(download, rateMaximum)}"/>
         <path class="traffic-upload-area" d="${trafficAreaPath(upload, rateMaximum)}"/>
         <polyline class="traffic-download-line" points="${trafficChartPoints(download, rateMaximum)}"/>
@@ -2651,11 +2668,19 @@ function renderTrafficRankings() {
     </button>`).join("")}</div>`;
 }
 
+function trafficRangeTitle() {
+  return t("trafficRangeTitle", { hours: state.trafficHours });
+}
+
+function renderTrafficRangeToggle() {
+  return `<div class="traffic-range" role="group" aria-label="${escapeHtml(t("trafficRangeLabel"))}">${TRAFFIC_HOURS_OPTIONS.map(hours => `<button class="traffic-range-button${state.trafficHours === hours ? " is-active" : ""}" type="button" data-traffic-hours="${hours}" aria-pressed="${state.trafficHours === hours}">${hours}h</button>`).join("")}</div>`;
+}
+
 function renderTrafficView(metrics) {
   const series = buildTrafficSeries();
   return `<section class="traffic-view">
     <article class="traffic-dashboard panel">
-      <div class="traffic-dashboard-head"><div><div class="panel-title traffic-dashboard-title">${escapeHtml(t("recent24hTraffic"))}</div><div class="traffic-dashboard-copy">${escapeHtml(t("trafficWindow"))}</div></div>
+      <div class="traffic-dashboard-head"><div><div class="panel-title traffic-dashboard-title">${escapeHtml(trafficRangeTitle())}</div><div class="traffic-dashboard-copy">${escapeHtml(t("trafficWindow"))}</div>${renderTrafficRangeToggle()}</div>
         <div class="traffic-dashboard-legend">
           <span><i class="traffic-dot is-upload"></i>${escapeHtml(t("upload"))} <strong>${escapeHtml(formatRate(metrics.uploadRate))}</strong></span>
           <span><i class="traffic-dot is-download"></i>${escapeHtml(t("download"))} <strong>${escapeHtml(formatRate(metrics.downloadRate))}</strong></span>
@@ -2664,7 +2689,7 @@ function renderTrafficView(metrics) {
           <span class="traffic-total-summary">↑ ${escapeHtml(formatBytes(metrics.totalUpload, 2))} <b>↓ ${escapeHtml(formatBytes(metrics.totalDownload, 2))}</b></span>
         </div>
       </div>
-      <div class="traffic-chart-shell">${renderTrafficChart(series, metrics)}${state.trafficHistoryLoading ? `<div class="traffic-loading"><span></span>${escapeHtml(t("trafficHistoryLoading"))}</div>` : ""}</div>
+      <div class="traffic-chart-shell">${renderTrafficChart(series, metrics)}${isTrafficHistoryLoading() ? `<div class="traffic-loading"><span></span>${escapeHtml(t("trafficHistoryLoading"))}</div>` : ""}</div>
       <div class="traffic-ranking">
         <div class="traffic-ranking-head"><div><h2>${escapeHtml(t("trafficTop5"))}</h2><p>${escapeHtml(t("trafficRankCopy"))}</p></div><span class="traffic-ranking-icon">${icon("list", 18)}</span></div>
         ${renderTrafficRankings()}
@@ -3006,14 +3031,50 @@ async function saveThemeSettings() {
   }
 }
 
+function isTrafficHistoryLoading(hours = state.trafficHours) {
+  return state.trafficHistoryLoadingByHours.has(String(hours));
+}
+
+// 「空窗口节点跳过」（默认关闭，见 TRAFFIC_SKIP_STALE）：只有状态新鲜、节点离线，
+// 且最后上报时间再加 1 小时余量仍早于窗口起点时，才认为该窗口内不可能存在记录。
+function shouldSkipTrafficHistory(node) {
+  if (!TRAFFIC_SKIP_STALE) return false;
+  const status = state.statuses[node.uuid];
+  const updated = finiteNumber(status?.cfsm_updated, 0);
+  if (!updated) return false;
+  if (nodeIsOnline(node.uuid)) return false;
+  if (!state.lastUpdated || Date.now() - state.lastUpdated > TRAFFIC_STALE_STATE_MAX_MS) return false;
+  const start = Date.now() - state.trafficHours * 3600 * 1000;
+  return updated + 60 * 60 * 1000 < start;
+}
+
+function setTrafficHours(hours) {
+  const next = TRAFFIC_HOURS_OPTIONS.includes(hours) ? hours : TRAFFIC_DEFAULT_HOURS;
+  if (state.trafficHours === next) return;
+  state.trafficHours = next;
+  const cached = state.trafficHistoryCache.get(String(next));
+  state.trafficHistory = cached ? cached.map : new Map();
+  state.trafficHistoryLoadedAt = cached ? cached.loadedAt : 0;
+  renderApp();
+  void loadTrafficHistory();
+}
+
 async function loadTrafficHistory(force = false) {
-  if (state.trafficHistoryLoading) return;
-  if (!force && state.trafficHistoryLoadedAt && Date.now() - state.trafficHistoryLoadedAt < 5 * 60 * 1000) return;
-  state.trafficHistoryLoading = true;
+  const hours = state.trafficHours;
+  const cacheKey = String(hours);
+  const cached = state.trafficHistoryCache.get(cacheKey) || null;
+  if (state.trafficHistoryLoadingByHours.has(cacheKey)) return;
+  if (!force && cached && Date.now() - cached.loadedAt < TRAFFIC_CACHE_TTL_MS) {
+    state.trafficHistory = cached.map;
+    state.trafficHistoryLoadedAt = cached.loadedAt;
+    return;
+  }
+  state.trafficHistoryLoadingByHours.add(cacheKey);
   if (state.currentView === "traffic") renderApp();
 
   try {
     const history = new Map();
+    let skipped = 0;
     if (state.demoMode) {
       for (const node of state.nodes) history.set(node.uuid, demoHistory(node.uuid));
     } else {
@@ -3021,8 +3082,13 @@ async function loadTrafficHistory(force = false) {
       const workers = Array.from({ length: Math.min(4, Math.max(1, state.nodes.length)) }, async () => {
         while (cursor < state.nodes.length) {
           const node = state.nodes[cursor++];
+          if (shouldSkipTrafficHistory(node)) {
+            skipped += 1;
+            history.set(node.uuid, []);
+            continue;
+          }
           try {
-            const rows = await api.getHistory(node.uuid, TRAFFIC_HISTORY_HOURS, { timeout: 20000 });
+            const rows = await api.getHistory(node.uuid, hours, { timeout: 20000 });
             history.set(node.uuid, mapHistoryRows(rows, {
               node,
               status: state.statuses[node.uuid] || null,
@@ -3036,10 +3102,16 @@ async function loadTrafficHistory(force = false) {
       });
       await Promise.all(workers);
     }
-    state.trafficHistory = history;
-    state.trafficHistoryLoadedAt = Date.now();
+    const loadedAt = Date.now();
+    state.trafficHistoryCache.set(cacheKey, { map: history, loadedAt });
+    state.trafficHistorySkipped = skipped;
+    // 只有当前档位未变化时才回写视图：切换档位期间返回的结果只进缓存，不串档。
+    if (state.trafficHours === hours) {
+      state.trafficHistory = history;
+      state.trafficHistoryLoadedAt = loadedAt;
+    }
   } finally {
-    state.trafficHistoryLoading = false;
+    state.trafficHistoryLoadingByHours.delete(cacheKey);
     if (state.currentView === "traffic") renderApp();
   }
 }
@@ -3206,6 +3278,12 @@ function handleClick(event) {
     saveFavorites();
     renderApp();
     showToast(wasFavorite ? t("favoriteRemoved") : t("favoriteAdded"), getNodeByUuid(uuid)?.name || uuid, wasFavorite ? "info" : "success");
+    return;
+  }
+
+  const trafficHours = event.target.closest("[data-traffic-hours]")?.dataset.trafficHours;
+  if (trafficHours) {
+    setTrafficHours(Number(trafficHours));
     return;
   }
 

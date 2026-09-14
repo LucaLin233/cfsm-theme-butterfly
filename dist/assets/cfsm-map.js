@@ -190,7 +190,8 @@ export function mapNode(raw) {
     mem_total: megabytesToBytes(raw.ram_total),
     swap_total: megabytesToBytes(raw.swap_total),
     disk_total: megabytesToBytes(raw.disk_total),
-    // 排序沿用原主题的 `weight` 语义，但取值来自 CFSM 的 `sort_order`。
+    // 取值来自 CFSM 的 `sort_order`（语义为「越小越靠前」：`/api/servers` 按 sort_order ASC 返回），
+    // 与上游 Komari 的 `weight`（越大越靠前）方向相反，排序比较在 app.js 中按升序处理。
     weight: toNumber(raw.sort_order) ?? 0,
     hidden: toBool(raw.is_hidden),
     online: resolveOnline(raw),

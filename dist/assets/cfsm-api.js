@@ -167,7 +167,10 @@ export function createCfsmApi(options) {
   return new CfsmApi(options);
 }
 
-// 站点若开启全局 Turnstile，写接口需要额外校验头，本移植版不实现 → 只读降级。
+// 站点若开启**全局** Turnstile（`site_options.turnstile_enabled`），CFSM 要求**所有 `/api/*`**
+// 携带 `X-Turnstile-Token`；bypass 仅 `/api/config`（不带该 Header 时）、`/api/ws`、`/admin/api`。
+// 本移植版不实现 Turnstile 凭证链（获取 token、缓存 3600 秒凭证、过期刷新、403 重试）→
+// 这类站点上主题不可用，调用方须给出明确提示；只在 /admin/api 登录流程启用 Turnstile 的站点不受影响。
 export function isTurnstileBlocking(config) {
   return config?.turnstile_enabled === true;
 }
