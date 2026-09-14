@@ -1,6 +1,6 @@
 import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=__THEME_VERSION__";
 import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking, readStoredToken } from "./cfsm-api.js?v=__THEME_VERSION__";
-import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=__THEME_VERSION__";
+import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportGroupStale, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=__THEME_VERSION__";
 import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=__THEME_VERSION__";
 import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=__THEME_VERSION__";
 
@@ -175,7 +175,8 @@ const STRINGS = {
     realtimeFallbackCopy: "已降级为按间隔刷新",
     realtimeConnecting: "正在建立实时连接…",
     realtimeProbeForbidden: "实时连接被站点拒绝（403，可能启用了 Turnstile 或来源限制），已降级为按间隔刷新。",
-    drawerHistoryUnavailable: "历史记录加载失败，图表使用本地采样数据。",
+    drawerHistoryUnavailable: "历史记录加载失败，图表仅显示本地采样数据。",
+    drawerHistoryEmpty: "该时间窗内暂无可用历史数据，图表仅显示本地采样数据。",
     realtimeTimeoutPrompt: "实时连接已达到站点设定的时限。\n\n点「确定」重新连接，「取消」改为定时轮询。",
     globalCoverage: "全球覆盖",
     globalCoverageCopy: "{regions} 个区域 · {nodes} 个节点",
@@ -378,7 +379,8 @@ const STRINGS = {
     realtimeFallbackCopy: "Fell back to interval polling",
     realtimeConnecting: "Opening the live connection…",
     realtimeProbeForbidden: "The site rejected the live connection (403, possibly Turnstile or origin restrictions); fell back to interval polling.",
-    drawerHistoryUnavailable: "History failed to load; charts fall back to local samples.",
+    drawerHistoryUnavailable: "History failed to load; charts show local samples only.",
+    drawerHistoryEmpty: "No usable history in this window; charts show local samples only.",
     realtimeTimeoutPrompt: "The live connection reached the limit set by this site.\n\nOK reconnects, Cancel switches to periodic polling.",
     globalCoverage: "Global coverage",
     globalCoverageCopy: "{regions} regions · {nodes} nodes",
@@ -581,7 +583,8 @@ const STRINGS = {
     realtimeFallbackCopy: "一定間隔のポーリングに降格しました",
     realtimeConnecting: "リアルタイム接続を確立中…",
     realtimeProbeForbidden: "サイトにリアルタイム接続を拒否されました（403：Turnstile またはオリジン制限の可能性）。一定間隔のポーリングに降格しました。",
-    drawerHistoryUnavailable: "履歴の読み込みに失敗しました。グラフはローカルサンプルで表示しています。",
+    drawerHistoryUnavailable: "履歴の読み込みに失敗しました。グラフはローカルサンプルのみ表示しています。",
+    drawerHistoryEmpty: "この時間帯に利用できる履歴がありません。グラフはローカルサンプルのみ表示しています。",
     realtimeTimeoutPrompt: "リアルタイム接続がサイト設定の上限に達しました。\n\nOK で再接続、キャンセルで定期ポーリングに切り替えます。",
     globalCoverage: "グローバルカバレッジ",
     globalCoverageCopy: "{regions} リージョン · {nodes} ノード",
@@ -889,8 +892,14 @@ function reportStaleAfterMs() {
 // 报告级字段（磁盘、三网延迟/丢包、进程/连接数、启动时间）只在周期性报告样本里出现。
 // 超过 staleAfter 未再出现即视为「未知」并按不可用展示，而不是继续显示上一轮的旧值；
 // 判定基于最近一次含报告级字段的样本时间（`cfsm_report_at`），快照数据没有该字段 → 视为新鲜。
-function statusReportStale(uuid) {
-  return isReportStale(nodeStatus(uuid), { staleAfterMs: reportStaleAfterMs() });
+// `group` 为空 = 任一报告级字段（整体判据）；给出分组则按该组的最后出现时间判定。
+// 逐组判定的意义：探针持续上报不得延长磁盘/负载等长期缺失组的有效期。
+function statusReportStale(uuid, group = null) {
+  const status = nodeStatus(uuid);
+  if (!status) return false;
+  const staleAfterMs = reportStaleAfterMs();
+  if (group) return isReportGroupStale(status, group, { staleAfterMs });
+  return isReportStale(status, { staleAfterMs });
 }
 
 function applyRealtimeBatch(message) {
@@ -1162,6 +1171,7 @@ const state = {
   drawerRecords: null,
   drawerLoading: false,
   drawerHistoryError: false,
+  drawerHistoryEmpty: false,
   // 深链单机作用域：detail 时列表未加载，节点与状态分别来自 detailNode / statuses[id]
   dataScope: DATA_SCOPE.none,
   detailNode: null,
@@ -2298,7 +2308,7 @@ function aggregateMetrics() {
   const onlineStatuses = statuses.filter(status => status.online === true);
   const online = state.nodes.filter(node => nodeIsOnline(node.uuid)).length;
   const freshDiskStatuses = state.nodes
-    .filter(node => nodeIsOnline(node.uuid) && !statusReportStale(node.uuid))
+    .filter(node => nodeIsOnline(node.uuid) && !statusReportStale(node.uuid, "disk"))
     .map(node => nodeStatus(node.uuid))
     .filter(Boolean);
   const regions = new Set(state.nodes.map(node => String(node.region || "").trim()).filter(Boolean)).size;
@@ -2771,9 +2781,11 @@ function renderNodeCard(node, index) {
   const cpu = clamp(status.cpu, 0, 100);
   const memory = percent(status.ram, status.ram_total || node.mem_total);
   const disk = percent(status.disk, status.disk_total || node.disk_total);
-  // 磁盘与线路延迟是报告级字段：过期后按不可用展示（CPU/内存来自高频样本，不受影响）
-  const stale = statusReportStale(node.uuid);
-  const latency = stale ? null : bestLatency(status);
+  // 报告级字段逐组判定：过期后按不可用展示（CPU/内存来自高频样本，不受影响）
+  const diskStale = statusReportStale(node.uuid, "disk");
+  const lineStale = statusReportStale(node.uuid, "line");
+  const bootStale = statusReportStale(node.uuid, "boot");
+  const latency = lineStale ? null : bestLatency(status);
   const latencyInfo = latencyClass(latency);
   const colors = ["var(--accent)", "#2aa6d6", "#8a61e8", "#ec8d3d", "#2ab59b", "#d35f91", "#4f83e6", "#e06067"];
   const color = colors[index % colors.length];
@@ -2794,12 +2806,12 @@ function renderNodeCard(node, index) {
     </div>
     <button class="favorite-button${favorite ? " is-active" : ""}" type="button" data-favorite-uuid="${escapeHtml(node.uuid)}" aria-label="${escapeHtml(t("favorites"))}">${icon("favorites", 16)}</button>
     <div class="node-main">
-      <div class="node-meters">${meter(t("cpu"), cpu)}${meter(t("memory"), memory)}${meter(t("disk"), stale ? null : disk, disk > 82 ? "var(--red)" : undefined)}</div>
+      <div class="node-meters">${meter(t("cpu"), cpu)}${meter(t("memory"), memory)}${meter(t("disk"), diskStale ? null : disk, disk > 82 ? "var(--red)" : undefined)}</div>
       ${lineChart(samples)}
     </div>
     ${protocolTags ? `<div class="ip-tags">${protocolTags}</div>` : ""}
     ${renderRemainingTraffic(node)}
-    <div class="node-footer"><span class="node-footer-item">↑ ${escapeHtml(formatRate(status.net_in))} · ↓ ${escapeHtml(formatRate(status.net_out))}</span><span class="node-footer-item">${escapeHtml(formatBytes(totalTraffic))}</span><span class="node-footer-item">${escapeHtml(formatDuration(status.uptime))}</span></div>
+    <div class="node-footer"><span class="node-footer-item">↑ ${escapeHtml(formatRate(status.net_in))} · ↓ ${escapeHtml(formatRate(status.net_out))}</span><span class="node-footer-item">${escapeHtml(formatBytes(totalTraffic))}</span><span class="node-footer-item">${escapeHtml(bootStale ? "—" : formatDuration(status.uptime))}</span></div>
   </article>`;
 }
 
@@ -2835,16 +2847,17 @@ function buildAlerts() {
       alerts.push({ uuid: node.uuid, title: node.name || node.uuid, message: t("maintenance"), severity: "offline", time: node.updated_at || new Date().toISOString() });
       continue;
     }
-    // 报告级字段过期时，磁盘/丢包判定用的是上一轮旧值 → 不据此产生告警
-    if (statusReportStale(node.uuid)) continue;
+    // 报告级字段过期时，磁盘/丢包判定用的是上一轮旧值 → 不据此产生告警（逐项按分组判定）
+    const diskStale = statusReportStale(node.uuid, "disk");
+    const lineStale = statusReportStale(node.uuid, "line");
     const cpu = clamp(status.cpu, 0, 100);
     const memory = percent(status.ram, status.ram_total || node.mem_total);
     const disk = percent(status.disk, status.disk_total || node.disk_total);
     const loss = bestLoss(status);
     if (cpu >= 85) alerts.push({ uuid: node.uuid, title: node.name || node.uuid, message: t("highCpu", { value: Math.round(cpu) }), severity: "warning", time: status.time });
     if (memory >= 90) alerts.push({ uuid: node.uuid, title: node.name || node.uuid, message: t("highMemory", { value: Math.round(memory) }), severity: "warning", time: status.time });
-    if (disk >= 90) alerts.push({ uuid: node.uuid, title: node.name || node.uuid, message: t("highDisk", { value: Math.round(disk) }), severity: "danger", time: status.time });
-    if (loss > 0) alerts.push({ uuid: node.uuid, title: node.name || node.uuid, message: t("packetLoss", { value: Math.round(loss * 10) / 10 }), severity: "warning", time: status.time });
+    if (!diskStale && disk >= 90) alerts.push({ uuid: node.uuid, title: node.name || node.uuid, message: t("highDisk", { value: Math.round(disk) }), severity: "danger", time: status.time });
+    if (!lineStale && loss > 0) alerts.push({ uuid: node.uuid, title: node.name || node.uuid, message: t("packetLoss", { value: Math.round(loss * 10) / 10 }), severity: "warning", time: status.time });
   }
   return alerts.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
 }
@@ -3129,13 +3142,13 @@ function renderDrawer() {
   // 已删除/已隐藏/深链接有误：给"未找到"反馈，不留空抽屉
   if (!node) return renderDrawerMissing(state.drawerUuid);
   const status = nodeStatus(node.uuid) || {};
-  const stale = statusReportStale(node.uuid);
-  const latency = stale ? null : bestLatency(status);
+  const diskStale = statusReportStale(node.uuid, "disk");
+  const latency = statusReportStale(node.uuid, "line") ? null : bestLatency(status);
   const memory = percent(status.ram, status.ram_total || node.mem_total);
   const disk = percent(status.disk, status.disk_total || node.disk_total);
   return `<button class="drawer-handle" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}"><span></span></button><div class="drawer-scroll"><header class="drawer-header"><span class="drawer-node-flag">${regionFlag(node.region)}</span><div class="drawer-title"><h2>${escapeHtml(node.name || node.uuid)}</h2><p>${escapeHtml(nodeSubtitle(node))}</p></div><button class="icon-button drawer-close" type="button" data-action="close-drawer" aria-label="${escapeHtml(t("close"))}">${icon("close")}</button></header>
-    <div class="drawer-body"><div class="drawer-status-strip">${drawerStat(t("cpu"), formatPercent(status.cpu))}${drawerStat(t("memory"), formatPercent(memory))}${drawerStat(t("disk"), stale ? "—" : formatPercent(disk))}${drawerStat(t("averageLatency"), latency === null ? "—" : `${Math.round(latency)} ms`)}</div>
-      ${state.drawerLoading ? `<div class="drawer-loading"><div><div class="drawer-loading-spinner"></div>${escapeHtml(t("loadingDetails"))}</div></div>` : `${state.drawerHistoryError ? `<p class="drawer-notice is-warning" role="status">${icon("warning", 14)}${escapeHtml(t("drawerHistoryUnavailable"))}</p>` : ""}${renderDrawerCharts(node, status)}${renderDrawerLines(node, status)}${renderBilling(node, status)}`}
+    <div class="drawer-body"><div class="drawer-status-strip">${drawerStat(t("cpu"), formatPercent(status.cpu))}${drawerStat(t("memory"), formatPercent(memory))}${drawerStat(t("disk"), diskStale ? "—" : formatPercent(disk))}${drawerStat(t("averageLatency"), latency === null ? "—" : `${Math.round(latency)} ms`)}</div>
+      ${state.drawerLoading ? `<div class="drawer-loading"><div><div class="drawer-loading-spinner"></div>${escapeHtml(t("loadingDetails"))}</div></div>` : `${state.drawerHistoryError || state.drawerHistoryEmpty ? `<p class="drawer-notice is-warning" role="status">${icon("warning", 14)}${escapeHtml(state.drawerHistoryError ? t("drawerHistoryUnavailable") : t("drawerHistoryEmpty"))}</p>` : ""}${renderDrawerCharts(node, status)}${renderDrawerLines(node, status)}${renderBilling(node, status)}`}
       ${renderHardware(node, status)}
     </div></div>`;
 }
@@ -3167,8 +3180,8 @@ function renderDrawerCharts(node, status) {
 function renderDrawerLines(node, status) {
   const lines = Object.values(status.ping || {}).filter(isRecord);
   if (!lines.length) return "";
-  // 三网延迟/丢包同样是报告级字段：过期后不再展示上一轮的数值与迷你柱
-  const stale = statusReportStale(node.uuid);
+  // 三网延迟/丢包同为报告级字段：过期后不再展示上一轮的数值与迷你柱
+  const stale = statusReportStale(node.uuid, "line");
   const window = stale ? [] : (Array.isArray(node?.cfsm?.latencyWindow) ? node.cfsm.latencyWindow : []);
   const rows = lines
     .map(line => {
@@ -3225,13 +3238,13 @@ function renderBilling(node, status) {
 }
 
 function renderHardware(node, status) {
-  const stale = statusReportStale(node.uuid);
+  const stale = statusReportStale(node.uuid, "metrics");
   const connectionTotal = finiteNumber(status.connections);
   const udp = finiteNumber(status.connections_udp);
   const tcp = Math.max(connectionTotal - Math.min(udp, connectionTotal), 0);
   const items = [
     [t("os"), node.os], [t("kernel"), node.kernel_version], [t("architecture"), node.arch], [t("virtualization"), node.virtualization],
-    [t("cpuName"), node.cpu_name], [t("cpuCores"), node.cpu_cores], [t("gpu"), node.gpu_name], [t("load"), `${finiteNumber(status.load).toFixed(2)} / ${finiteNumber(status.load5).toFixed(2)} / ${finiteNumber(status.load15).toFixed(2)}`],
+    [t("cpuName"), node.cpu_name], [t("cpuCores"), node.cpu_cores], [t("gpu"), node.gpu_name], [t("load"), stale ? "—" : `${finiteNumber(status.load).toFixed(2)} / ${finiteNumber(status.load5).toFixed(2)} / ${finiteNumber(status.load15).toFixed(2)}`],
     [t("process"), stale ? "—" : status.process], [t("connections"), stale ? "—" : `TCP ${Math.round(tcp)} · UDP ${Math.round(udp)}`], [t("group"), node.group], [t("tags"), nodeTags(node).join(", ")],
     // CFSM 无数据源的字段（虚拟化、显卡、无标签）直接隐藏，不显示成"未知"
   ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== "");
@@ -3550,6 +3563,7 @@ async function loadDrawerRecords(uuid) {
   state.drawerLoading = Boolean(node) && !state.demoMode;
   state.drawerRecords = null;
   state.drawerHistoryError = false;
+  state.drawerHistoryEmpty = false;
   renderApp();
   document.body.style.overflow = "hidden";
   // 未找到（已删除/隐藏/链接有误）：保留抽屉显示"未找到"，不静默失败
@@ -3562,12 +3576,15 @@ async function loadDrawerRecords(uuid) {
   }
   try {
     const rows = await api.getHistory(uuid, 1, { timeout: 15000 });
-    state.drawerRecords = mapHistoryRows(rows, {
+    const mapped = mapHistoryRows(rows, {
       node: getNodeByUuid(uuid),
       status: nodeStatus(uuid),
       sources: lineSources(),
       now: Date.now(),
     });
+    state.drawerRecords = mapped;
+    // 请求成功但没有可用历史（离线节点常见）：与"请求失败"区分开，各自一条提示
+    state.drawerHistoryEmpty = mapped.length === 0;
   } catch {
     // 历史失败不再静默：回落到流量视图缓存（可能为空），并在抽屉里给出独立提示
     state.drawerHistoryError = true;
@@ -3642,6 +3659,7 @@ async function enterDetailScope(uuid) {
   state.drawerUuid = uuid;
   state.drawerRecords = null;
   state.drawerHistoryError = false;
+  state.drawerHistoryEmpty = false;
   state.drawerLoading = true;
   state.nodes = [];
   state.statuses = {};

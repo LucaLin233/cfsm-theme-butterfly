@@ -4,7 +4,7 @@
 // 不碰 DOM 与全局状态；编排（何时建连、何时降级轮询）在 app.js。
 // 依据：官方 `theme-develop.md` 与 `API.md`（v2.8.5）——`subscribe=all` 默认不推送，
 // 必须显式发送 `{type:"subscribe", scope:"all", ids}`；非法 scope/ids 以关闭码 1008 断开。
-import { mapStatus } from "./cfsm-map.js?v=0.7.3";
+import { mapStatus } from "./cfsm-map.js?v=0.7.4";
 
 // 服务端约束（API.md）：ids ≤ 500 个，单个 id 长度 1–64，字符集 [A-Za-z0-9._:-]。
 export const REALTIME_LIMITS = Object.freeze({
@@ -61,6 +61,37 @@ const REPORT_LEVEL_SOURCES = Object.freeze({
   cfsm_boot_time: ["boot_time"],
 });
 const LINE_SOURCES = Object.freeze(["ping_", "loss_"]);
+
+// 报告级字段分组：同一次上报的尾部样本里一起出现，因此按组维护"最后出现时间"。
+// 分组的意义在于**逐组过期**——某一组持续出现不得延长其它长期缺失组的有效期。
+// 键名以 `_` 结尾表示前缀匹配（探针字段是 ping_ct/ping_cu/... 这类），否则严格相等
+// （`disk` 是 IO 明细对象，不能被 `disk_used` 命中）。
+export const REPORT_FIELD_GROUPS = Object.freeze({
+  line: Object.freeze(["ping_", "loss_"]),
+  disk: Object.freeze(["disk_used", "disk_total"]),
+  io: Object.freeze(["disk"]),
+  memory: Object.freeze(["ram_total", "swap_total"]),
+  boot: Object.freeze(["boot_time"]),
+  metrics: Object.freeze(["processes", "tcp_conn", "udp_conn", "load_avg"]),
+});
+
+// 严格按 `_` 后缀约定匹配：前缀键看 startsWith，普通键要求完全相等。
+function matchesReportKey(data, keys) {
+  for (const key of Object.keys(data)) {
+    for (const candidate of keys) {
+      if (candidate.endsWith("_") ? key.startsWith(candidate) : key === candidate) return true;
+    }
+  }
+  return false;
+}
+
+function seenReportGroups(data) {
+  const seen = [];
+  for (const [group, keys] of Object.entries(REPORT_FIELD_GROUPS)) {
+    if (matchesReportKey(data, keys)) seen.push(group);
+  }
+  return seen;
+}
 
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -187,8 +218,14 @@ export function mergeStatusUpdate(previous, data, { sources = [], now = Date.now
   const incoming = mapStatus({ id: rawId, ...data }, { sources, now });
   if (!incoming) return previous || null;
   if (!previous) {
-    const reportAt = hasAnyKey(data, Object.values(REPORT_LEVEL_SOURCES).flat().concat(LINE_SOURCES)) ? now : 0;
-    const created = { ...incoming, cfsm_report_at: reportAt };
+    const reportKeys = Object.values(REPORT_LEVEL_SOURCES).flat().concat(LINE_SOURCES);
+    const hasReport = matchesReportKey(data, reportKeys);
+    const seen = seenReportGroups(data);
+    const created = {
+      ...incoming,
+      cfsm_report_at: hasReport ? now : 0,
+      cfsm_report_seen: seen.length ? Object.fromEntries(seen.map(group => [group, now])) : {},
+    };
     // 收到实时样本即在线证据：样本不带时间字段时不要被判离线。
     const hasTimestamp = Number.isFinite(Number(data.last_updated)) || Number.isFinite(Number(data.timestamp));
     if (!hasTimestamp) created.online = true;
@@ -202,7 +239,7 @@ export function mergeStatusUpdate(previous, data, { sources = [], now = Date.now
     if (!hasAnyKey(data, keys)) merged[field] = previous[field];
   }
   for (const [field, keys] of Object.entries(REPORT_LEVEL_SOURCES)) {
-    if (!hasAnyKey(data, keys)) merged[field] = previous[field];
+    if (!matchesReportKey(data, keys)) merged[field] = previous[field];
   }
   merged.cfsm_line_values = hasAnyKey(data, LINE_SOURCES)
     ? mergeLineValues(previous.cfsm_line_values, incoming.cfsm_line_values)
@@ -215,13 +252,25 @@ export function mergeStatusUpdate(previous, data, { sources = [], now = Date.now
   const sampleTime = Number(data.last_updated ?? data.timestamp);
   merged.time = Number.isFinite(sampleTime) && sampleTime > 0 ? sampleTime : previous.time ?? null;
   merged.cfsm_updated = merged.time;
-  merged.cfsm_report_at = hasAnyKey(data, Object.values(REPORT_LEVEL_SOURCES).flat().concat(LINE_SOURCES))
-    ? now
-    : previous.cfsm_report_at || 0;
+  const reportKeys = Object.values(REPORT_LEVEL_SOURCES).flat().concat(LINE_SOURCES);
+  merged.cfsm_report_at = matchesReportKey(data, reportKeys) ? now : previous.cfsm_report_at || 0;
+  // 逐组刷新：只更新本次确实出现的组，其余组沿用旧时间（互不延长有效期）
+  const seenGroups = seenReportGroups(data);
+  merged.cfsm_report_seen = { ...(previous.cfsm_report_seen || {}) };
+  for (const group of seenGroups) merged.cfsm_report_seen[group] = now;
+  if (!Object.keys(merged.cfsm_report_seen).length) delete merged.cfsm_report_seen;
   return merged;
 }
 
 // 报告级字段过期判定：超过 staleAfter 未再出现即视为「未知」（调用方决定如何展示）。
+// 分组级过期：某一组从未出现过（时间戳缺失）→ 不判过期，避免把"服务端从不提供"误标为"已过期"。
+export function isReportGroupStale(status, group, { now = Date.now(), staleAfterMs = 0 } = {}) {
+  if (!staleAfterMs || !group) return false;
+  const at = Number(status?.cfsm_report_seen?.[group]);
+  if (!Number.isFinite(at) || at <= 0) return false;
+  return now - at > staleAfterMs;
+}
+
 export function isReportStale(status, { now = Date.now(), staleAfterMs = 0 } = {}) {
   if (!staleAfterMs) return false;
   const at = Number(status?.cfsm_report_at);

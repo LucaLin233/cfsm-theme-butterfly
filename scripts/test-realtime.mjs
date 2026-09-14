@@ -403,6 +403,25 @@ await checkAsync("按需 ping 关闭时（pingIdleMs=0）不产生额外计时�
   channel.stop();
 });
 
+// --- 计时器路径：旧代计时器不得在新代生效 ---
+
+await checkAsync("stop 之后旧的退避计时器被清除且不再建连", async () => {
+  const timers = createFakeTimers();
+  const sockets = createFakeWebSocket();
+  const channel = createChannel({ timers, sockets });
+  channel.start(["srv-1"]);
+  const socket = sockets.instances.at(-1);
+  socket.open();
+  socket.serverClose(1006); // 异常关闭 → 排入退避重连计时器
+  assert.equal(timers.pendingCount, 1, "应挂着一个退避重连计时器");
+  channel.stop();
+  assert.equal(timers.pendingCount, 0, "stop 必须清掉退避计时器");
+  timers.runAll(); // 即使被外部强行触发，也不得再建连接
+  assert.equal(sockets.instances.length, 1, "停止后不得再建立连接");
+  channel.stop(); // 幂等
+  assert.equal(sockets.instances.length, 1);
+});
+
 // --- 结果 ---
 
 if (failures.length) {
