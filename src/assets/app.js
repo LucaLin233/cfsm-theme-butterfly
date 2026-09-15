@@ -74,6 +74,12 @@ function structureSignature() {
     state.config?.offline_position || "",
     [...state.favorites].sort().join("|"),
     orderedIds.join(","),
+    // 在线态向量：影响 hero 的「N 个节点需要关注」与卡片 is-offline（offline_position=keep 时顺序不变，
+    // 仅靠 orderedIds 检不出）→ 少量高价值变化必须即时触发结构提交，不能等兜底对账。
+    state.nodes.map((node) => (nodeIsOnline(node.uuid) ? "1" : "0")).join(""),
+    // 告警身份（uuid:severity，不含含数值的 message，避免阈值抖动把签名带崩）：告警面板是列表结构，
+    // 不做补丁 → 由签名变化即时整页重建。
+    buildAlerts().map((alert) => `${alert.uuid}:${alert.severity}`).sort().join("|"),
   ].join("\u0001");
 }
 
@@ -2465,12 +2471,13 @@ function renderDetailShell() {
     : state.detailError
       ? `<div class="detail-scope-error" role="alert"><p>${escapeHtml(state.detailError.message)}</p><button class="secondary-button" type="button" data-action="leave-detail">${icon("refresh", 15)}${escapeHtml(t("retry"))}</button></div>`
       : `<p class="detail-scope-hint">${escapeHtml(t("detailShellHint"))}</p>${open ? "" : `<button class="secondary-button" type="button" data-action="leave-detail">${escapeHtml(t("detailBackToList"))}</button>`}`;
+  detachToastStack();
   app.innerHTML = `<div class="app-shell detail-scope${open ? " has-mobile-overlay" : ""}">
     <main class="app-main"><div class="content-shell"><section class="detail-scope-card">${body}</section></div></main>
-    <div class="toast-stack" aria-live="polite"></div>
     <div class="drawer-backdrop${open ? " is-open" : ""}" data-action="close-drawer"></div>
     <aside class="node-drawer${open ? " is-open" : ""}" aria-label="${escapeHtml(t("nodeDetails"))}">${open ? renderDrawer() : ""}</aside>
   </div>`;
+  reattachToastStack();
   restoreRenderContinuity(continuity);
   requestAnimationFrame(updateMobileNavVisibility);
   scheduleMobileInputState();
@@ -2537,6 +2544,7 @@ function renderApp() {
   const mobileNavClass = mobileNavHidden ? " mobile-nav-hidden" : "";
   const mobileSearchClass = state.mobileSearchOpen ? " mobile-search-active" : "";
 
+  detachToastStack();
   app.innerHTML = `<div class="app-shell${sidebarClass}${openClass}${viewClass}${overlayClass}${mobileNavClass}${mobileSearchClass}">
     <aside class="app-sidebar" aria-label="Primary navigation">
       <div class="sidebar-head">
@@ -2592,13 +2600,13 @@ function renderApp() {
       </div>
     </main>
     ${renderMobileNav()}
-    <div class="toast-stack" aria-live="polite"></div>
     <div class="drawer-backdrop${state.drawerUuid ? " is-open" : ""}" data-action="close-drawer"></div>
     <aside class="node-drawer${state.drawerUuid ? " is-open" : ""}" aria-label="${escapeHtml(t("nodeDetails"))}">${state.drawerUuid ? renderDrawer() : ""}</aside>
     ${renderSettingsPanel()}
   </div>`;
   updateThemeButtons();
   refreshOpenGlobe();
+  reattachToastStack();
   restoreRenderContinuity(continuity);
   requestAnimationFrame(updateMobileNavVisibility);
   scheduleMobileInputState();
@@ -2751,7 +2759,7 @@ function renderToolbar(metrics) {
 
 function filterChip(filter, label, count) {
   const active = state.filter === filter || (state.currentView === "favorites" && filter === "favorites");
-  return `<button class="filter-chip${active ? " is-active" : ""}" type="button" data-filter="${filter}">${escapeHtml(label)}<span class="filter-count">${count}</span></button>`;
+  return `<button class="filter-chip${active ? " is-active" : ""}" type="button" data-filter="${filter}">${escapeHtml(label)}<span class="filter-count" data-live="filter-count-${filter}">${count}</span></button>`;
 }
 
 function sortOption(value, labelKey) {
@@ -2831,7 +2839,7 @@ function freezeDynamicOrder(sorted) {
 //   ② 卡片派生表达式必须与 renderNodeCard 完全一致（后续应提取为共享派生函数，消除两处漂移）；
 //   ③ 未纳入补丁集的字段（余量条、hero、延迟面板、告警面板）由 LIVE_RECONCILE_MS 兜底对账，
 //      最坏陈旧时间即该间隔，不会长期错误。
-const LIVE_RECONCILE_MS = 2000;
+const LIVE_RECONCILE_MS = 10000;
 let liveCards = new Map();
 let liveFields = new Map();
 let liveIndexedRender = -1;
@@ -2915,6 +2923,10 @@ function patchLiveFields() {
   set("traffic-down", formatBytes(metrics.totalDownload));
   set("speed-up", formatRate(metrics.uploadRate));
   set("speed-down", formatRate(metrics.downloadRate));
+  set("filter-count-all", String(metrics.total));
+  set("filter-count-online", String(metrics.online));
+  set("filter-count-offline", String(metrics.offline));
+  set("filter-count-favorites", String(state.favorites.size));
 }
 
 function patchLiveValues() {
@@ -3439,9 +3451,35 @@ function updatedLabel() {
   return seconds < 2 ? t("updatedNow") : t("updatedAgo", { value: seconds });
 }
 
-function showToast(title, message, type = "info") {
+// toast 容器独立于可替换根：渲染前摘下、渲染后放回，已显示的提示不再被整页重建丢弃
+// （原实现把 .toast-stack 渲染在 app 内，任何整页重建都会把它连同未消失的提示一起换掉）。
+let detachedToastStack = null;
+
+function toastStack() {
+  let stack = document.querySelector(".toast-stack");
+  if (!stack) {
+    stack = document.createElement("div");
+    stack.className = "toast-stack";
+    stack.setAttribute("aria-live", "polite");
+    (app.querySelector(".app-shell") || app).append(stack);
+  }
+  return stack;
+}
+
+function detachToastStack() {
   const stack = document.querySelector(".toast-stack");
-  if (!stack) return;
+  detachedToastStack = stack && stack.childElementCount ? stack : null;
+  if (stack) stack.remove();
+}
+
+function reattachToastStack() {
+  if (!detachedToastStack) return;
+  (app.querySelector(".app-shell") || app).append(detachedToastStack);
+  detachedToastStack = null;
+}
+
+function showToast(title, message, type = "info") {
+  const stack = toastStack();
   const color = type === "success" ? "var(--green)" : type === "warning" ? "var(--amber)" : type === "danger" ? "var(--red)" : "var(--accent)";
   const element = document.createElement("div");
   element.className = "toast";
@@ -4500,7 +4538,7 @@ async function initialize() {
     state.loading = false;
     renderApp();
     // 深链接：列表已加载时按 #/server/<id> 打开详情抽屉（非法 id 的提示由 applyHashRoute 统一给出，
-    // 必须晚于首次渲染 —— renderApp 会重建 .toast-stack，渲染前弹的提示会被丢掉）
+    // 必须晚于首次渲染 —— 渲染前 app 里还没有 .app-shell，toastStack() 无处安放）
     if (state.currentView === "traffic") void loadTrafficHistory();
     applyHashRoute();
     if (wantGlobe) openGlobe();
