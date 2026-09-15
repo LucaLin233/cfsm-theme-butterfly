@@ -79,15 +79,24 @@ export function createTurnstileStorage(backing = null) {
   // 内存只在**根本没有 backing**（访问被拒 / 无 localStorage）时作为降级存储；backing 存在但写入失败
   // （配额 / 只读沙箱）时如实失败，由链层按「拿不到凭证」走恢复，不谎报未持久化的值。
   const memory = new Map();
+  // 存储模式生命周期：**一旦成功取得过 backing，就永久以 backing 为准** —— 之后即使探测或读取再次失败，
+  // 也只如实返回空，绝不回头启用此前纯内存模式留下的副本。否则「外部已删除」会被旧值复活：
+  // 探测被拒 → 写内存 M → 存储恢复可读 → 外部写入 E → 外部删除 E → 探测再被拒 → 读回 M。
+  let backingSeen = false;
   const resolve = () => {
-    if (backing) return backing;
+    if (backing) {
+      backingSeen = true;
+      return backing;
+    }
     try {
       if (typeof localStorage !== "undefined" && localStorage) {
         localStorage.getItem(TURNSTILE_VERIFIED_KEY);
+        backingSeen = true;
+        memory.clear();
         return localStorage;
       }
     } catch {
-      // 访问被拒 → 内存降级
+      // 访问被拒 → 仅当从未取得过 backing 时才是纯内存模式
     }
     return null;
   };
@@ -98,11 +107,11 @@ export function createTurnstileStorage(backing = null) {
         try {
           return target.getItem(key) || "";
         } catch {
-          // 读失败：保守返回空，宁可让链层重新验证，也不用来源不明的值
+          // 读失败：保守返回空（已进入 backing 模式，绝不用旧内存值）
           return "";
         }
       }
-      return memory.get(key) || "";
+      return backingSeen ? "" : memory.get(key) || "";
     },
     set(key, value) {
       const target = resolve();
@@ -110,11 +119,12 @@ export function createTurnstileStorage(backing = null) {
         try {
           target.setItem(key, value);
         } catch {
-          // 写失败（配额/只读沙箱）：不写内存副本（否则读路径被遮蔽）
+          // 写失败（配额/只读沙箱）：如实失败，不写内存副本
         }
+        memory.delete(key);
         return;
       }
-      memory.set(key, value);
+      if (!backingSeen) memory.set(key, value);
     },
     remove(key) {
       memory.delete(key);
@@ -559,14 +569,12 @@ export function createTurnstileChain({
     isLocked: () => locked,
     isRecovering: () => Boolean(recoverPromise),
     // 探测/交换外的受保护请求在恢复期间等待同一个恢复 Promise，避免并发重复挑战
-    // 在途恢复的**有界**等待。预算必须覆盖一次恢复的**最坏上界**，否则合法恢复会被等待者判成终局失败
-    // （消费端会把历史请求写成空数组并缓存 5 分钟、置上抽屉/详情错误，恢复成功后这些状态不会自动清除）。
-    // 最坏上界 = 连续 TURNSTILE_MAX_ATTEMPTS 轮 ×（脚本加载 + 等待用户 + 交换）；只超越这个上界才说明
-    // 恢复真的不结算。
-    // 注意范围：只约束「加入在途恢复的等待者」；发起恢复的那个请求仍直接 await recover()，不受此限。
-    // 已知取舍：这个上界（分钟级）较长，等待者会久等——比误判成失败好，但更合适的是把它当「仍在恢复、
-    // 可重试」的独立状态在消费端处理，属后续项。
-    waitForRecovery: (timeout = TURNSTILE_MAX_ATTEMPTS * (limits.script + limits.user + limits.exchange)) => {
+    // 在途恢复的等待：**默认不设人工上限**，直接跟随这次恢复的结算（与发起者同命运）。
+    // 理由：任何「另一个数字」都可能在合法恢复途中超时（多轮尝试、脚本每次加载重试、调度延迟），把
+    // 「仍在验证」误报成终局失败——消费端会把历史请求写成空数组并缓存 5 分钟、置上抽屉/详情错误，
+    // 且恢复成功后不会自动清除。恢复自身的三阶段超时才是唯一上界，它保证这里的等待必然结算。
+    // 参数保留：调用方/测试可显式传入毫秒上限，仅用于确实需要提前放弃的场景。
+    waitForRecovery: (timeout = 0) => {
       if (!recoverPromise) return Promise.resolve({ ok: true, reason: "" });
       if (!(timeout > 0)) return recoverPromise;
       return new Promise((resolve) => {

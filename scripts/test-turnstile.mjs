@@ -886,11 +886,13 @@ await checkAsync("11b 网络层抛错 → status 0、零挑战、零凭证清理
 // 此前只测了 harness 自己注入的另一套存储，生产实现 `createTurnstileStorage` 的读写语义零覆盖，
 // 内存优先那次改动正是从这里溜过去的（读路径遮蔽外部更新/删除）。
 
-function createMemoryBacking({ writable = true } = {}) {
+function createMemoryBacking({ writable = true, failRead = false } = {}) {
   const map = new Map();
   let canWrite = writable;
+  let readFails = failRead;
   return {
     getItem(key) {
+      if (readFails) throw new Error("SecurityError");
       return map.has(key) ? map.get(key) : null;
     },
     setItem(key, value) {
@@ -903,6 +905,10 @@ function createMemoryBacking({ writable = true } = {}) {
     // 模拟「稍后恢复可写」或「外部写入者不受本实例配额限制」
     setWritable(value) {
       canWrite = value;
+    },
+    // 模拟读取权限被收回
+    setFailRead(value) {
+      readFails = value;
     },
   };
 }
@@ -951,6 +957,61 @@ await checkAsync("12c 无 localStorage（backing 为空）→ 纯内存降级，
     assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "清除后不得残留");
   } finally {
     if (saved !== undefined) globalThis.localStorage = saved;
+  }
+});
+
+await checkAsync("13a 存储忠实：值确实落盘；写失败不得谎报未落盘的新值", async () => {
+  const backing = createMemoryBacking();
+  const storage = createTurnstileStorage(backing);
+  storage.set(TURNSTILE_VERIFIED_KEY, "A");
+  assert.equal(backing.getItem(TURNSTILE_VERIFIED_KEY), "A", "必须真的落盘（不只是包装器回显）");
+  backing.setWritable(false);
+  storage.set(TURNSTILE_VERIFIED_KEY, "B"); // 配额满
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "A", "写失败后只能读到已持久化的 A");
+  assert.equal(backing.getItem(TURNSTILE_VERIFIED_KEY), "A", "落盘内容不得被改写");
+});
+
+await checkAsync("13b 读取权限被收回 → 保守返回空，绝不用旧值", async () => {
+  const backing = createMemoryBacking();
+  const storage = createTurnstileStorage(backing);
+  storage.set(TURNSTILE_VERIFIED_KEY, "A");
+  backing.setFailRead(true);
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "读失败必须返回空");
+  backing.setFailRead(false);
+  backing.removeItem(TURNSTILE_VERIFIED_KEY); // 外部删除
+  backing.setFailRead(true);
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "外部删除 + 读失败也不得复活旧值");
+});
+
+await checkAsync("13c 模式切换：探测被拒留下的内存副本，在存储恢复可读后必须被废弃", async () => {
+  const saved = globalThis.localStorage;
+  const map = new Map();
+  let probeFails = true;
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    get() {
+      if (probeFails) throw new Error("SecurityError");
+      return {
+        getItem: (key) => (map.has(key) ? map.get(key) : null),
+        setItem: (key, value) => map.set(key, String(value)),
+        removeItem: (key) => map.delete(key),
+      };
+    },
+  });
+  try {
+    const storage = createTurnstileStorage(null);
+    storage.set(TURNSTILE_VERIFIED_KEY, "M"); // 探测被拒 → 纯内存模式
+    assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "M");
+    probeFails = false; // 存储恢复可读
+    storage.set(TURNSTILE_VERIFIED_KEY, "E");
+    assert.equal(map.get(TURNSTILE_VERIFIED_KEY), "E", "恢复可读后必须真的落盘");
+    map.delete(TURNSTILE_VERIFIED_KEY); // 外部删除
+    assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "外部删除必须可见");
+    probeFails = true; // 探测再次被拒
+    assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "不得复活纯内存模式留下的旧值 M");
+  } finally {
+    if (saved === undefined) delete globalThis.localStorage;
+    else Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: saved });
   }
 });
 
