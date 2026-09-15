@@ -4,7 +4,7 @@
 // 不碰 DOM 与全局状态；编排（何时建连、何时降级轮询）在 app.js。
 // 依据：官方 `theme-develop.md` 与 `API.md`（v2.8.5）——`subscribe=all` 默认不推送，
 // 必须显式发送 `{type:"subscribe", scope:"all", ids}`；非法 scope/ids 以关闭码 1008 断开。
-import { mapStatus } from "./cfsm-map.js?v=0.9.0";
+import { mapStatus } from "./cfsm-map.js?v=0.9.1";
 
 // 服务端约束（API.md）：ids ≤ 500 个，单个 id 长度 1–64，字符集 [A-Za-z0-9._:-]。
 export const REALTIME_LIMITS = Object.freeze({
