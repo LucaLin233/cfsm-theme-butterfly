@@ -39,7 +39,12 @@ https://github.com/LucaLin233/cfsm-theme-butterfly/tree/stable/dist
 * To roll back, promote a previously verified commit again (`sh scripts/promote-stable.sh <commit>`);
   it takes effect within the `theme_url` cache window (~120 s). Stage tags (`port-vX.Y.Z`) mark the
   commits that were promoted.
-* `theme_url` lives in `site_options` and is cached for ~120 s, so switching takes up to two minutes.
+* **Propagation is not instant.** The server caches the theme bundle per `theme_url` path, with the TTL
+  depending on the ref kind (`src/utils/config.js`): a **branch** ref (`stable`) is cached up to **1 hour**
+  (`THEME_ASSET_CACHE_TTL_SECONDS = 3600`), a **commit** ref for 24 h
+  (`THEME_COMMIT_CACHE_TTL_SECONDS = 86400` — harmless, commit content is immutable). `site_options`
+  itself is cached for 5 min (`THEME_STORE_CACHE_TTL_SECONDS = 300`).
+  To publish **immediately**, point `theme_url` at the new commit: a different path is a different cache entry.
 * If the theme's `index.html` cannot be fetched the site returns `502 Theme index.html is unavailable`
   and does **not** fall back to the built-in theme — recover through `/admin` by changing `theme_url`.
 
