@@ -920,28 +920,38 @@ await checkAsync("12a 外部上下文的更新/清除必须可见（读路径不
   assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "外部清除后不得回落到陈旧内存值");
 });
 
-await checkAsync("12b 可读不可写（隐私模式/配额）→ 内存兜底可读写，外部写入仍优先", async () => {
+await checkAsync("12b 可读不可写（配额/只读沙箱）→ 如实失败，绝不谎报未持久化的值", async () => {
   const backing = createMemoryBacking({ writable: false });
   const storage = createTurnstileStorage(backing);
-  storage.set(TURNSTILE_TOKEN_KEY, "token-1");
-  assert.equal(storage.get(TURNSTILE_TOKEN_KEY), "token-1", "写失败也要能立刻读到");
-  storage.set(TURNSTILE_VERIFIED_KEY, "cred-fallback");
-  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "cred-fallback");
-  // 兜底 key 上外部一旦写入真值，仍以 backing 为准
+  storage.set(TURNSTILE_VERIFIED_KEY, "cred-not-persisted");
+  // 没持久化成功就不许报可用值：读路径只能反映 backing 的真实内容
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "写失败不得谎报可用值");
+  // 外部写入真值 → 必须可见
   backing.setWritable(true);
   backing.setItem(TURNSTILE_VERIFIED_KEY, "external-wins");
   assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "external-wins");
-  // 清除必须同时清掉兜底副本
-  storage.remove(TURNSTILE_VERIFIED_KEY);
-  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "清除后不得残留兜底值");
+  // 外部删除 → 必须可见，不得因本实例曾写过而复活
+  backing.removeItem(TURNSTILE_VERIFIED_KEY);
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "外部删除后不得复活");
+  // 恢复可写后新值必须真的落盘并被读到
+  storage.set(TURNSTILE_VERIFIED_KEY, "after-recover");
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "after-recover");
 });
 
 await checkAsync("12c 无 localStorage（backing 为空）→ 纯内存降级，读写与清除都成立", async () => {
-  const storage = createTurnstileStorage(null);
-  storage.set(TURNSTILE_VERIFIED_KEY, "mem-only");
-  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "mem-only");
-  storage.remove(TURNSTILE_VERIFIED_KEY);
-  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "清除后不得残留");
+  // 显式保证前提（LENS 建议）：createTurnstileStorage(null) 仍会探测全局 localStorage，
+  // 若运行环境提供了它就会测不到降级路径 —— 这里先摘掉，测完还原。
+  const saved = globalThis.localStorage;
+  delete globalThis.localStorage;
+  try {
+    const storage = createTurnstileStorage(null);
+    storage.set(TURNSTILE_VERIFIED_KEY, "mem-only");
+    assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "mem-only");
+    storage.remove(TURNSTILE_VERIFIED_KEY);
+    assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "清除后不得残留");
+  } finally {
+    if (saved !== undefined) globalThis.localStorage = saved;
+  }
 });
 
 // --- 结果 ---
