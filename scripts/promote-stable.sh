@@ -1,6 +1,12 @@
 #!/bin/sh
-# 把 stable 分支快进到指定提交（默认 origin/main 的 HEAD）。
-# 用途：theme_url 固定指向 .../tree/stable/dist，任何改动先落 main、验证通过后再提到 stable。
+# 保持 stable 这个「别名分支」与 main 一致 —— **main 本身就是稳定线**。
+#
+# 分支约定（2026-09-15 起，作者 Huilang Liu 的发布流程）：
+#   main   = 稳定版来源（src + dist），只有验证过的改动才合进来；
+#   build  = 构建产物（根目录 = dist 内容），由 scripts/publish-build.sh 发布，每次 build 一个 commit；
+#   test   = 后续开发分支，改完验证通过后再合回 main；
+#   stable = main 的别名，仅为让早期指向 .../tree/stable/dist 的 theme_url 继续解析。
+#
 # 用法：sh scripts/promote-stable.sh [commit]
 set -e
 git fetch -q origin main

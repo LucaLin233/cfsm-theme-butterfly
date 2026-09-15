@@ -26,13 +26,26 @@
 
 ## 部署
 
-`theme_url` 必须指向**固定 commit** 并带上 `dist/` 子路径：
+分支分工（作者 Huilang Liu 的发布流程）：
+
+| 分支 | 内容 | 由谁写 |
+|---|---|---|
+| `main` | 源码 + `dist/` —— **稳定线** | 只有验证过的改动合进来 |
+| `build` | 构建产物放在**根目录**（`index.html`、`assets/*`），每次构建一个 commit | `sh scripts/publish-build.sh` |
+| `test` | 开发中的改动，可能不可用 | 日常修改 |
+| `stable` | `main` 的别名，仅为让早期 `theme_url` 继续解析 | `sh scripts/promote-stable.sh` |
+
+`theme_url` 指向 **`build`** 分支（产物在其根目录，不带 `dist/` 子路径）：
 
 ```text
-https://github.com/LucaLin233/cfsm-theme-butterfly/tree/<commit-sha>/dist
+https://github.com/LucaLin233/cfsm-theme-butterfly/tree/build
 ```
 
-- 不要指向分支：往分支推送会**直接改掉线上**，中间没有预览。回滚就是把 `theme_url` 换成上一个阶段 tag 的 commit。
+- 日常在 `test` 上改，验证通过后合进 `main`（`main` 即稳定版，`stable` 只是跟随它的别名）。
+- 发布产物用 `sh scripts/publish-build.sh`：它重新构建、校验、拒绝脏工作区，把 `dist/` 铺到 `build`
+  根目录，并写 `BUILD-INFO.json`（版本 + 来源提交），因此**每次构建都能追到它由哪个提交产出**；
+  没有改动时重复执行是空操作。
+- 要固定版本就指向那个构建 commit：`.../tree/<build-commit>`（内容不可变）。
 - `theme_url` 存在 `site_options`，约 120 秒 isolate 缓存，切换最坏滞后两分钟。
 - 主题 `index.html` 拉取失败时站点返回 `502 Theme index.html is unavailable`，**不会自动回落**内置主题；
   救火路径是经 `/admin` 改 `theme_url`。

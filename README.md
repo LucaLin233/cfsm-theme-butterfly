@@ -26,25 +26,34 @@ use `net_tx_monthly` (up) / `net_rx_monthly` (down); all-time totals use `net_tx
 
 ## Deploy
 
-`theme_url` points at the **`stable`** branch and the `dist/` subdirectory:
+Branch roles (the author's publishing flow):
+
+| Branch | Holds | Written by |
+|---|---|---|
+| `main` | source + `dist/` — **the stable line** | verified changes only |
+| `build` | built bundle at its root (`index.html`, `assets/*`), one commit per build | `sh scripts/publish-build.sh` |
+| `test` | work in progress, may be broken | day-to-day changes |
+| `stable` | alias of `main`, kept only so older `theme_url`s keep resolving | `sh scripts/promote-stable.sh` |
+
+`theme_url` points at the **`build`** branch — the built output sits at its root, with no `dist/` subdirectory:
 
 ```text
-https://github.com/LucaLin233/cfsm-theme-butterfly/tree/stable/dist
+https://github.com/LucaLin233/cfsm-theme-butterfly/tree/build
 ```
 
-* Work lands on `main`; `stable` is fast-forwarded only **after a change is verified**, so the site
-  always tracks the latest verified build without editing `theme_url`:
-  `sh scripts/promote-stable.sh [commit]` (default = `origin/main`; refuses commits not on `main`).
-* Do **not** point `theme_url` at `main` — every push would go live with no gate.
-* To roll back, promote a previously verified commit again (`sh scripts/promote-stable.sh <commit>`);
-  it takes effect within the `theme_url` cache window (~120 s). Stage tags (`port-vX.Y.Z`) mark the
-  commits that were promoted.
+* Develop on `test`; merge into `main` only after the change is verified — `main` **is** the stable line,
+  and `stable` is just an alias that follows it.
+* Publish the bundle with `sh scripts/publish-build.sh`: it rebuilds, validates, refuses a dirty tree,
+  lays `dist/` out at the root of `build`, and writes `BUILD-INFO.json` (version + source commit) so
+  **every build is traceable to the commit it was built from**. Running it twice without changes is a no-op.
+* To pin a release, use that build commit instead of the branch: `.../tree/<build-commit>` (immutable content).
 * **Propagation is not instant.** The server caches the theme bundle per `theme_url` path, with the TTL
-  depending on the ref kind (`src/utils/config.js`): a **branch** ref (`stable`) is cached up to **1 hour**
+  depending on the ref kind (`src/utils/config.js`): a **branch** ref (`build`) is cached up to **1 hour**
   (`THEME_ASSET_CACHE_TTL_SECONDS = 3600`), a **commit** ref for 24 h
   (`THEME_COMMIT_CACHE_TTL_SECONDS = 86400` — harmless, commit content is immutable). `site_options`
   itself is cached for 5 min (`THEME_STORE_CACHE_TTL_SECONDS = 300`).
-  To publish **immediately**, point `theme_url` at the new commit: a different path is a different cache entry.
+  To publish **immediately**, point `theme_url` at the new build commit: a different path is a different
+  cache entry.
 * If the theme's `index.html` cannot be fetched the site returns `502 Theme index.html is unavailable`
   and does **not** fall back to the built-in theme — recover through `/admin` by changing `theme_url`.
 

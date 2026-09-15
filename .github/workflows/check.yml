@@ -2,7 +2,8 @@ name: Check theme
 
 on:
   push:
-    branches: [main, port]
+    # build 分支只放构建产物、没有 src/，因此不在此列（在它上面跑 build 必然失败）。
+    branches: [main, test, port]
   pull_request:
   workflow_dispatch:
 
