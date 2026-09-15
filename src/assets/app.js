@@ -31,6 +31,10 @@ const THEME_REPOSITORY = "https://github.com/LucaLin233/cfsm-theme-butterfly";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
 const MOBILE_GLOBE_QUERY = "(max-width: 680px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
 const MOBILE_STATUS_RENDER_IDLE_MS = 180;
+// 叠加层（详情抽屉 / 通知 / 移动搜索 / 侧边栏）打开时的合并窗口：桌面此前是**每个实时批次**
+// 都立刻整壳重建（PC 详情打开时实测 30+ 次/秒），既压住主线程，又让抽屉被反复销毁重建、
+// 滚动位置反复归零（帧落后于重建时会被永久钉在顶部）。合并成窗口内只渲染一次。
+const OVERLAY_STATUS_RENDER_IDLE_MS = 180;
 // 流量视图默认档位：6 小时。`/api/history/all` 只接受离散档位（由 cfsm-api 收敛），
 // 且服务端返回点数固定（long_history_points，默认 120），因此客户端体积与档位无关，
 // 真正随档位增长的是服务端 D1 的扫描范围 —— 默认取更小的档位以降低查询放大。
@@ -1214,6 +1218,7 @@ let mobileNavLastScrollY = Math.max(0, window.scrollY);
 let mobileNavScrollFrame = null;
 let mobileInputStateFrame = null;
 let mobileStatusRenderTimer = null;
+let overlayStatusRenderTimer = null;
 let statusRefreshInFlight = false;
 // 输入法组字（composition）期间不能重渲染：整页重渲染会打断候选，导致中文/日文根本打不进去
 let searchComposing = false;
@@ -2678,6 +2683,10 @@ function renderDetailShell() {
     clearTimeout(mobileStatusRenderTimer);
     mobileStatusRenderTimer = null;
   }
+  if (overlayStatusRenderTimer !== null) {
+    clearTimeout(overlayStatusRenderTimer);
+    overlayStatusRenderTimer = null;
+  }
   const continuity = captureRenderContinuity();
   const open = Boolean(state.drawerUuid);
   const body = state.detailLeaving
@@ -2711,17 +2720,27 @@ function captureRenderContinuity() {
   };
 }
 
+// 滚动位置必须在**换壳的同一个任务里同步写回**：放进 rAF 会晚一帧，浏览器先绘出「新容器停在 0」
+// 的中间态；只要帧率落后于重建节奏（PC 详情抽屉实测 30+ 次/秒），下一次 capture 就会读到这个 0
+// 并原样写回，位置从此被钉在顶部（用户端表现为「详情面板一直被拉上去」）。
+// 同时按新内容的尺寸夹紧，避免内容变短时写回越界值。
+function restoreScrollContinuity(snapshot) {
+  const clampAxis = (el, value, extent) => Math.min(Math.max(value, 0), Math.max(0, el[extent] - el[extent === "scrollHeight" ? "clientHeight" : "clientWidth"]));
+
+  const statusRibbon = document.querySelector(".status-ribbon");
+  if (statusRibbon && snapshot.statusScrollLeft !== null) statusRibbon.scrollLeft = clampAxis(statusRibbon, snapshot.statusScrollLeft, "scrollWidth");
+
+  const filterGroup = document.querySelector(".filter-group");
+  if (filterGroup && snapshot.filterScrollLeft !== null) filterGroup.scrollLeft = clampAxis(filterGroup, snapshot.filterScrollLeft, "scrollWidth");
+
+  const drawerScroll = document.querySelector(".drawer-scroll");
+  if (drawerScroll && state.drawerUuid && snapshot.drawerScrollTop !== null) drawerScroll.scrollTop = clampAxis(drawerScroll, snapshot.drawerScrollTop, "scrollHeight");
+}
+
 function restoreRenderContinuity(snapshot) {
+  restoreScrollContinuity(snapshot);
+  // 焦点与选区仍放下一帧：需要在浏览器完成布局后再聚焦，且与滚动无关
   requestAnimationFrame(() => {
-    const statusRibbon = document.querySelector(".status-ribbon");
-    if (statusRibbon && snapshot.statusScrollLeft !== null) statusRibbon.scrollLeft = snapshot.statusScrollLeft;
-
-    const filterGroup = document.querySelector(".filter-group");
-    if (filterGroup && snapshot.filterScrollLeft !== null) filterGroup.scrollLeft = snapshot.filterScrollLeft;
-
-    const drawerScroll = document.querySelector(".drawer-scroll");
-    if (drawerScroll && state.drawerUuid && snapshot.drawerScrollTop !== null) drawerScroll.scrollTop = snapshot.drawerScrollTop;
-
     if (!snapshot.activeId || (snapshot.activeId === "mobile-search" && !state.mobileSearchOpen)) return;
     const nextActive = document.getElementById(snapshot.activeId);
     if (!(nextActive instanceof HTMLInputElement || nextActive instanceof HTMLSelectElement)) return;
@@ -2749,6 +2768,10 @@ function renderApp() {
   if (mobileStatusRenderTimer !== null) {
     clearTimeout(mobileStatusRenderTimer);
     mobileStatusRenderTimer = null;
+  }
+  if (overlayStatusRenderTimer !== null) {
+    clearTimeout(overlayStatusRenderTimer);
+    overlayStatusRenderTimer = null;
   }
   const continuity = captureRenderContinuity();
   const metrics = aggregateMetrics();
@@ -4189,13 +4212,26 @@ function resetMobileNavVisibility() {
 
 function scheduleStatusRender(manual = false) {
   const mobile = matchMedia(MOBILE_LAYOUT_QUERY).matches;
-  if (!mobile || manual) {
+  const overlayOpen = Boolean(state.drawerUuid || state.globeOpen || state.mobileSearchOpen || state.sidebarOpen || state.notificationsOpen);
+  // 桌面且无叠加层：结构变化频率低，保持原有的「立刻整壳重建」
+  if (manual || (!mobile && !overlayOpen)) {
     renderApp();
     return;
   }
   if (document.hidden) return;
   if (state.globeOpen) {
     refreshOpenGlobe();
+    return;
+  }
+  if (!mobile) {
+    // 桌面 + 叠加层打开：合并到窗口内只渲染一次。此前这里每个实时批次都立刻整壳重建
+    // （PC 打开详情时实测 30+ 次/秒），把抽屉 DOM 连同图表反复销毁重建、压满主线程，
+    // 并让滚动位置反复归零（帧落后时会被永久钉在顶部）。
+    if (overlayStatusRenderTimer !== null) return;
+    overlayStatusRenderTimer = window.setTimeout(() => {
+      overlayStatusRenderTimer = null;
+      if (!document.hidden && !state.globeOpen) renderApp();
+    }, OVERLAY_STATUS_RENDER_IDLE_MS);
     return;
   }
   if (state.drawerUuid || state.mobileSearchOpen || state.sidebarOpen || state.notificationsOpen) return;
