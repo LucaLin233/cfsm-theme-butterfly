@@ -1,16 +1,16 @@
-import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.9.9";
-import { createCfsmApi, createPoller, hasStoredToken, readStoredToken } from "./cfsm-api.js?v=0.9.9";
-import { TURNSTILE_REASON, TURNSTILE_STATE, createTurnstileChain, createTurnstileRuntime } from "./cfsm-turnstile.js?v=0.9.9";
-import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportGroupStale, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=0.9.9";
-import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.9.9";
-import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=0.9.9";
+import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.9.10";
+import { createCfsmApi, createPoller, hasStoredToken, readStoredToken } from "./cfsm-api.js?v=0.9.10";
+import { TURNSTILE_REASON, TURNSTILE_STATE, createTurnstileChain, createTurnstileRuntime } from "./cfsm-turnstile.js?v=0.9.10";
+import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportGroupStale, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=0.9.10";
+import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.9.10";
+import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=0.9.10";
 
 const DEG_TO_RAD = Math.PI / 180;
 let worldLandVectorsPromise = null;
 
 function loadWorldLandVectors() {
   if (!worldLandVectorsPromise) {
-    worldLandVectorsPromise = import("./world-data.js?v=0.9.9")
+    worldLandVectorsPromise = import("./world-data.js?v=0.9.10")
       .then(({ WORLD_LAND_POINTS }) => Object.freeze(WORLD_LAND_POINTS.map(([longitude, latitude]) => {
         const lat = latitude * DEG_TO_RAD;
         const lng = longitude * DEG_TO_RAD;
@@ -25,7 +25,7 @@ function loadWorldLandVectors() {
   return worldLandVectorsPromise;
 }
 
-const THEME_VERSION = "0.9.9";
+const THEME_VERSION = "0.9.10";
 // 移植版仓库；上游原主题为 TomorrowX6/Komari-Butterfly（MIT，署名见 README）。
 const THEME_REPOSITORY = "https://github.com/LucaLin233/cfsm-theme-butterfly";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
