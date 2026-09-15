@@ -1,16 +1,16 @@
-import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.9.8";
-import { createCfsmApi, createPoller, hasStoredToken, readStoredToken } from "./cfsm-api.js?v=0.9.8";
-import { TURNSTILE_REASON, TURNSTILE_STATE, createTurnstileChain, createTurnstileRuntime } from "./cfsm-turnstile.js?v=0.9.8";
-import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportGroupStale, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=0.9.8";
-import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.9.8";
-import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=0.9.8";
+import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.9.9";
+import { createCfsmApi, createPoller, hasStoredToken, readStoredToken } from "./cfsm-api.js?v=0.9.9";
+import { TURNSTILE_REASON, TURNSTILE_STATE, createTurnstileChain, createTurnstileRuntime } from "./cfsm-turnstile.js?v=0.9.9";
+import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportGroupStale, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=0.9.9";
+import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.9.9";
+import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=0.9.9";
 
 const DEG_TO_RAD = Math.PI / 180;
 let worldLandVectorsPromise = null;
 
 function loadWorldLandVectors() {
   if (!worldLandVectorsPromise) {
-    worldLandVectorsPromise = import("./world-data.js?v=0.9.8")
+    worldLandVectorsPromise = import("./world-data.js?v=0.9.9")
       .then(({ WORLD_LAND_POINTS }) => Object.freeze(WORLD_LAND_POINTS.map(([longitude, latitude]) => {
         const lat = latitude * DEG_TO_RAD;
         const lng = longitude * DEG_TO_RAD;
@@ -25,7 +25,7 @@ function loadWorldLandVectors() {
   return worldLandVectorsPromise;
 }
 
-const THEME_VERSION = "0.9.8";
+const THEME_VERSION = "0.9.9";
 // 移植版仓库；上游原主题为 TomorrowX6/Komari-Butterfly（MIT，署名见 README）。
 const THEME_REPOSITORY = "https://github.com/LucaLin233/cfsm-theme-butterfly";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
@@ -1474,8 +1474,9 @@ function regionEmoji(code) {
 // ① 去掉 `decoding="async"`（其语义就是允许「先画一帧空白、解码后再画」）与 `loading="lazy"` 的额外调度；
 // ② 按地区码预热一张 Image 并持有引用，给解码结果一个存活理由。
 // **注意这是缓解而非保证**：浏览器不承诺「有 JS 引用就不淘汰解码结果」，`decoding` 也只是提示。
-// 能否做到无空白帧，以实测为准 —— 复现：在 MutationObserver 回调（微任务，跑在本帧绘制之前）里读新建
-// `<img>` 的 `complete`/`naturalWidth`，两者均已就绪即说明该帧不会画空白。
+// 可复现的观测（用于排查，**不等于证明**）：在 MutationObserver 回调里读新建 `<img>` 的
+// `complete`/`naturalWidth` —— 就绪只说明回调时刻「加载状态与固有尺寸可用」（MDN 的 `complete`
+// 含「已入队等待渲染/合成」之态），**不能直接证明该帧已呈现**。是否仍有空白帧只能靠肉眼连续观察。
 const flagImageCache = new Map();
 function prewarmFlag(code) {
   if (flagImageCache.has(code)) return;
@@ -3168,7 +3169,8 @@ function schedulePatchOrRender() {
   if (document.hidden) return;
   // 移动布局同样走补丁路径：卡片 DOM 与桌面一致（差异只在 CSS），而整壳重渲染在手机上是每秒数次
   // 的新节点 + 旗帜等图片重新解码 —— 这正是「旗帜闪烁」的主因（桌面早已走补丁，所以只在手机上可见）。
-  // 其余弹层/抽屉状态本身需要结构提交，仍退回整页渲染。
+  // 其余弹层/抽屉/地球状态交由 scheduleStatusRender 处理：它会抑制或延后这些状态下的渲染，
+  // 地球场景只刷新地球（不是「继续整页渲染」）。
   if (state.globeOpen || state.drawerUuid
     || state.mobileSearchOpen || state.sidebarOpen || state.notificationsOpen) {
     scheduleStatusRender(false);
