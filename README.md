@@ -26,14 +26,19 @@ use `net_tx_monthly` (up) / `net_rx_monthly` (down); all-time totals use `net_tx
 
 ## Deploy
 
-`theme_url` must point at a **pinned commit** and the `dist/` subdirectory:
+`theme_url` points at the **`stable`** branch and the `dist/` subdirectory:
 
 ```text
-https://github.com/LucaLin233/cfsm-theme-butterfly/tree/<commit-sha>/dist
+https://github.com/LucaLin233/cfsm-theme-butterfly/tree/stable/dist
 ```
 
-* Pin the commit, not a branch — pushing to the branch would change a live site with no preview step.
-  To roll back, point `theme_url` at a previous stage tag's commit.
+* Work lands on `main`; `stable` is fast-forwarded only **after a change is verified**, so the site
+  always tracks the latest verified build without editing `theme_url`:
+  `sh scripts/promote-stable.sh [commit]` (default = `origin/main`; refuses commits not on `main`).
+* Do **not** point `theme_url` at `main` — every push would go live with no gate.
+* To roll back, promote a previously verified commit again (`sh scripts/promote-stable.sh <commit>`);
+  it takes effect within the `theme_url` cache window (~120 s). Stage tags (`port-vX.Y.Z`) mark the
+  commits that were promoted.
 * `theme_url` lives in `site_options` and is cached for ~120 s, so switching takes up to two minutes.
 * If the theme's `index.html` cannot be fetched the site returns `502 Theme index.html is unavailable`
   and does **not** fall back to the built-in theme — recover through `/admin` by changing `theme_url`.
