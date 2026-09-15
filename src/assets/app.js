@@ -1,5 +1,6 @@
 import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=__THEME_VERSION__";
-import { createCfsmApi, createPoller, hasStoredToken, isTurnstileBlocking, readStoredToken } from "./cfsm-api.js?v=__THEME_VERSION__";
+import { createCfsmApi, createPoller, hasStoredToken, readStoredToken } from "./cfsm-api.js?v=__THEME_VERSION__";
+import { TURNSTILE_REASON, TURNSTILE_STATE, createTurnstileChain, createTurnstileRuntime } from "./cfsm-turnstile.js?v=__THEME_VERSION__";
 import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportGroupStale, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=__THEME_VERSION__";
 import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=__THEME_VERSION__";
 import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=__THEME_VERSION__";
@@ -169,7 +170,13 @@ const STRINGS = {
     themeSettings: "主题设置",
     settingsDraftHint: "改动先在本地预览，点「保存设置」后写入站点。",
     settingsSignInHint: "未登录，只能查看。请先到 /admin#admin 登录后再保存。",
-    settingsTurnstileHint: "站点已开启全局 Turnstile：CFSM 要求所有 /api/* 请求携带校验头，本移植版未实现该凭证链，因此主题整体不可用（不只是设置面板只读）。",
+    turnstileChecking: "正在完成人机验证…",
+    turnstileWaitingUser: "请完成下方的人机验证后继续。",
+    turnstileFailed: "人机验证失败",
+    turnstileRetry: "重新验证",
+    turnstileLoadFailed: "验证组件加载失败，可能被网络或站点策略拦截。",
+    turnstileExhausted: "多次验证未通过，请刷新页面后重试。",
+    turnstileVerifyingHint: "正在验证，暂时无法保存设置。",
     settingsSave: "保存设置",
     settingsSaving: "保存中…",
     settingsSaved: "设置已保存",
@@ -373,7 +380,13 @@ const STRINGS = {
     themeSettings: "Theme settings",
     settingsDraftHint: "Changes preview locally; click “Save settings” to write them to the site.",
     settingsSignInHint: "Read-only: you are not signed in. Sign in at /admin#admin to save.",
-    settingsTurnstileHint: "This site enables global Turnstile, so CFSM requires every /api/* request to carry a verification header. This port does not implement that credential chain, so the theme is unusable (not merely read-only).",
+    turnstileChecking: "Completing the human verification…",
+    turnstileWaitingUser: "Finish the verification below to continue.",
+    turnstileFailed: "Human verification failed",
+    turnstileRetry: "Verify again",
+    turnstileLoadFailed: "The verification widget failed to load; it may be blocked by the network or the site policy.",
+    turnstileExhausted: "Verification kept failing. Refresh the page and try again.",
+    turnstileVerifyingHint: "Verification in progress; settings can not be saved right now.",
     settingsSave: "Save settings",
     settingsSaving: "Saving…",
     settingsSaved: "Settings saved",
@@ -577,7 +590,13 @@ const STRINGS = {
     themeSettings: "テーマ設定",
     settingsDraftHint: "変更はこの画面でのみ反映されます。「設定を保存」でサイトに書き込みます。",
     settingsSignInHint: "未ログインのため閲覧のみです。保存するには /admin#admin でログインしてください。",
-    settingsTurnstileHint: "このサイトではグローバル Turnstile が有効です。CFSM はすべての /api/* に検証ヘッダーを要求しますが、本移植版はその資格情報チェーンを実装していないため、テーマは利用できません（設定パネルが読み取り専用というだけではありません）。",
+    turnstileChecking: "人機認証を実行しています…",
+    turnstileWaitingUser: "続行するには下の認証を完了してください。",
+    turnstileFailed: "人機認証に失敗しました",
+    turnstileRetry: "再認証",
+    turnstileLoadFailed: "認証ウィジェットを読み込めませんでした。ネットワークまたはサイトポリシーでブロックされている可能性があります。",
+    turnstileExhausted: "認証に繰り返し失敗しました。ページを再読み込みして再試行してください。",
+    turnstileVerifyingHint: "認証中のため、現在は設定を保存できません。",
     settingsSave: "設定を保存",
     settingsSaving: "保存中…",
     settingsSaved: "設定を保存しました",
@@ -851,6 +870,30 @@ function networkArt() {
 // 数据层：CFSM 同源 REST（原主题的 Komari JSON-RPC 接口已整体替换）。
 // 分工：cfsm-api 负责请求/令牌/轮询，cfsm-map 负责三张字段映射表，theme-config 负责设置键与默认值。
 const api = createCfsmApi({ onUnauthorized: handleAuthInvalidated });
+
+// —— Turnstile 凭证链接线（批次 6） ——
+// 凭证（`turnstile_verified` / `turnstile_token`）由统一请求层按互斥头模式**动态注入**，
+// 调用方不再传校验头；本模块只负责三件事：启动门控、挑战界面、人工重试。
+// 计数语义（每次恢复过程连续 2 次 / 每请求重放一次 / 仅数据性成功复位）全部由
+// `cfsm-turnstile.js` 持有，UI 只从快照推导，不另建第二套状态机。
+const turnstileUi = {
+  visible: false, // 挑战页当前是否占据 #app
+  waiting: false, // 组件已挂载 → 阶段由「加载脚本」进入「等待用户」
+  retrying: false, // 人工重试进行中（按钮禁用，禁止并发点击绕过计数）
+  started: false, // 应用已完成首轮启动（决定人工重试是重跑启动还是只重跑挑战）
+};
+let startupInFlight = false;
+
+const turnstileRuntime = createTurnstileRuntime();
+const turnstile = createTurnstileChain({
+  requestRaw: (path, options) => api.requestRaw(path, options),
+  runtime: turnstileRuntime,
+  onState: snapshot => handleTurnstileState(snapshot),
+  // 组件容器必须在「等待用户」阶段就位：拿不到容器时组件会渲染到屏幕外，
+  // 用户看不到组件只能干等到 T2 超时 —— 因此先渲染挑战页，再取插槽。
+  containerProvider: () => takeTurnstileSlot(),
+});
+api.attachTurnstile(turnstile);
 
 // 令牌失效（401/403）：退回匿名并提示重新登录，不静默失败。
 function handleAuthInvalidated() {
@@ -1186,7 +1229,6 @@ const state = {
   cfsmConfig: null,
   sysConfig: null,
   themeOptions: {},
-  turnstileBlocked: false,
   version: { version: "unknown", hash: "unknown" },
   nodes: [],
   statuses: {},
@@ -2458,6 +2500,155 @@ function renderFatalError() {
   </section></main>`;
 }
 
+// —— Turnstile 挑战页：三阶段（加载脚本 / 等待用户 / 交换）与失败重试 ——
+// 组件容器在等待期**绝不能被重建**（重建会销毁组件、让回调永远丢失，最终只能等 T2 超时），
+// 因此只在首次进入时整体渲染 `#app`，之后一律定点更新文案/阶段/按钮。
+function turnstileSnapshot() {
+  return turnstile?.getSnapshot?.() || null;
+}
+
+// 阶段推导：`challenging` 在组件挂载前是「加载脚本」，挂载后是「等待用户」；
+// `probing`（仅启动探测）与 `ready` / `off` 都不单独开挑战页，沿用原有加载页/应用界面。
+function turnstileGatePhase() {
+  const snapshot = turnstileSnapshot();
+  if (!snapshot) return "idle";
+  if (snapshot.state === TURNSTILE_STATE.challenging) return turnstileUi.waiting ? "waiting" : "loading";
+  if (snapshot.state === TURNSTILE_STATE.exchanging) return "exchanging";
+  if (snapshot.state === TURNSTILE_STATE.failed) return "failed";
+  return "idle";
+}
+
+function turnstileGateVisible() {
+  return turnstileGatePhase() !== "idle";
+}
+
+// 「验证中」：探测 / 加载组件 / 等待用户 / 交换凭证。这些阶段受保护请求会被门控或排队，
+// 保存设置必然失败或长时间挂起 —— 用它代替已删除的 `turnstileBlocked` 限制（保留登录与
+// `settingsSaving` 限制不变）。
+function isTurnstileVerifying() {
+  const snapshot = turnstileSnapshot();
+  if (!snapshot) return false;
+  return snapshot.state === TURNSTILE_STATE.probing
+    || snapshot.state === TURNSTILE_STATE.challenging
+    || snapshot.state === TURNSTILE_STATE.exchanging;
+}
+
+// 失败文案按 reason 映射：脚本加载失败 / 等待用户超时（保持中性，不得写成「组件未响应」）/
+// 连续失败耗尽 / 其余（配置、交换被拒、组件 error·expired）。
+// 服务端文案（`snapshot.message`）只经 textContent 落地，等价于转义，绝不拼进 innerHTML。
+function turnstileGateModel(phase) {
+  const snapshot = turnstileSnapshot() || {};
+  const reason = String(snapshot.reason || "");
+  if (phase === "waiting") {
+    return { status: t("turnstileWaitingUser"), detail: "", spinner: true, retry: false };
+  }
+  if (phase !== "failed") {
+    return { status: t("turnstileChecking"), detail: "", spinner: true, retry: false };
+  }
+  const status = reason === TURNSTILE_REASON.scriptBlocked
+    ? t("turnstileLoadFailed")
+    : reason === TURNSTILE_REASON.userTimeout
+      ? t("turnstileWaitingUser")
+      : reason === TURNSTILE_REASON.exhausted || reason === TURNSTILE_REASON.locked
+        ? t("turnstileExhausted")
+        : t("turnstileFailed");
+  return {
+    status,
+    detail: typeof snapshot.message === "string" ? snapshot.message.trim() : "",
+    spinner: false,
+    retry: true, // 人工重试会开启新过程（计数重新计），因此失败态一律给出可用的重试按钮
+  };
+}
+
+function renderTurnstileGate() {
+  const phase = turnstileGatePhase();
+  const model = turnstileGateModel(phase);
+  if (!document.getElementById("turnstile-gate")) {
+    app.innerHTML = `<main class="loading-screen" id="turnstile-gate" data-phase="loading"><section class="loading-card" role="alert" aria-live="polite">
+    <div class="loading-logo">${butterflyLogo()}</div>
+    <h1>Komari Butterfly</h1>
+    <p data-turnstile-status></p>
+    <p data-turnstile-detail hidden></p>
+    <div id="turnstile-slot"></div>
+    <div class="loading-progress" data-turnstile-progress aria-label="Loading"></div>
+    <button class="primary-button" type="button" data-action="turnstile-retry" data-turnstile-retry hidden>${icon("refresh", 15)}${escapeHtml(t("turnstileRetry"))}</button>
+  </section></main>`;
+  }
+  const gate = document.getElementById("turnstile-gate");
+  gate.dataset.phase = phase;
+  const status = gate.querySelector("[data-turnstile-status]");
+  if (status) status.textContent = model.status;
+  const detail = gate.querySelector("[data-turnstile-detail]");
+  if (detail) {
+    detail.textContent = model.detail;
+    detail.hidden = !model.detail;
+  }
+  const progress = gate.querySelector("[data-turnstile-progress]");
+  if (progress) progress.hidden = !model.spinner;
+  const retry = gate.querySelector("[data-turnstile-retry]");
+  if (retry) {
+    retry.hidden = !model.retry;
+    retry.disabled = turnstileUi.retrying;
+  }
+  turnstileUi.visible = true;
+}
+
+// 组件插槽：不存在就先渲染挑战页；已存在则只做定点更新（容器身份保持，组件不被销毁）。
+function takeTurnstileSlot() {
+  turnstileUi.waiting = true;
+  renderTurnstileGate();
+  return document.getElementById("turnstile-slot");
+}
+
+// 凭证链状态回调：只做「阶段 → 界面」映射。任何状态变化都退出「等待用户」，
+// 该阶段只由组件挂载（takeTurnstileSlot）进入。
+function handleTurnstileState() {
+  turnstileUi.waiting = false;
+  syncTurnstileGate();
+}
+
+// 门控收敛：挑战中 → 渲染挑战页；结束（ready / off）→ 把界面交还应用层。
+function syncTurnstileGate() {
+  if (turnstileGateVisible()) {
+    renderTurnstileGate();
+    return;
+  }
+  if (!turnstileUi.visible) return;
+  turnstileUi.visible = false;
+  if (state.loading) renderLoading();
+  else if (state.error) renderFatalError();
+  else if (state.dataScope === DATA_SCOPE.detail) renderDetailShell();
+  else renderApp();
+}
+
+// 人工重试（唯一入口）：启动未完成 → 重跑启动流程（凭证链会重新探测配置，非整页 reload）；
+// 配置类失败 → 重新探测配置；挑战类失败 → `manualRetry()` 开启新过程（计数重新计）。
+async function retryTurnstile() {
+  if (turnstileUi.retrying) return;
+  turnstileUi.retrying = true;
+  syncTurnstileGate();
+  try {
+    if (!turnstileUi.started) {
+      await initialize();
+      return;
+    }
+    // 一律重跑 bootstrap：它会复位计数并**重新探测 /api/config**。若只跑 manualRetry（复用内存里的旧
+    // 配置），站点关闭全局 Turnstile 后该标签页会永远卡在挑战页（锁定态下探针根本发不出去）。
+    const result = await turnstile.bootstrap();
+    if (result?.ok) resumeAfterTurnstile();
+  } finally {
+    turnstileUi.retrying = false;
+    if (turnstileGateVisible()) renderTurnstileGate();
+  }
+}
+
+// 挑战成功后主动补一次数据刷新（不弹提示）：恢复期间被门控的请求已经失败，
+// 等下一个轮询（默认 30s）太慢。失败照旧走既有错误路径。
+function resumeAfterTurnstile() {
+  if (state.loading || state.error) return;
+  void refreshStatuses({ reason: "turnstile-resume" });
+}
+
 // detail 作用域的骨架：列表未加载，只显示进度/错误与抽屉入口 —— 不渲染首页任何视图。
 function renderDetailShell() {
   if (mobileStatusRenderTimer !== null) {
@@ -2519,6 +2710,12 @@ function restoreRenderContinuity(snapshot) {
 }
 
 function renderApp() {
+  // Turnstile 挑战门控：验证未完成时挑战页优先于一切渲染 —— 组件容器必须稳定存在，
+  // 任何一次整壳重渲染都会销毁已挂载的组件并让回调永远丢失。
+  if (turnstileGateVisible()) {
+    renderTurnstileGate();
+    return;
+  }
   // 集中闸门（DRAFT-v3 §A6）：detail 作用域只渲染单机骨架 + 抽屉，**早于一切全局聚合**。
   // 该作用域下列表从未加载，aggregateMetrics / buildAlerts / buildTrafficSeries / 过滤 / 通知
   // 一次都不能执行 —— 否则单台机器的数字会被当作全站统计（`?debug=1` 可读 renderCounters 验收）。
@@ -3615,12 +3812,13 @@ function renderSettingsBody() {
       return `<section class="settings-group"><h3>${escapeHtml(localizedValue(SECTION_LABELS[section], state.language))}</h3>${rows}</section>`;
     })
     .join("");
-  const notice = state.turnstileBlocked
-    ? `<p class="settings-notice is-warning">${escapeHtml(t("settingsTurnstileHint"))}</p>`
+  const verifying = isTurnstileVerifying();
+  const notice = verifying
+    ? `<p class="settings-notice is-warning">${escapeHtml(t("turnstileVerifyingHint"))}</p>`
     : loggedIn
       ? ""
       : `<p class="settings-notice">${escapeHtml(t("settingsSignInHint"))}</p>`;
-  const disabled = !loggedIn || state.turnstileBlocked || state.settingsSaving;
+  const disabled = !loggedIn || verifying || state.settingsSaving;
   return `<header class="settings-head"><div class="settings-head-copy"><div class="settings-title">${escapeHtml(t("themeSettings"))}</div><div class="settings-subtitle">${escapeHtml(t("settingsDraftHint"))}</div></div><button class="icon-button" type="button" data-action="close-settings" aria-label="${escapeHtml(t("close"))}">${icon("close")}</button></header>
     <div class="settings-scroll">${notice}${groups}</div>
     <footer class="settings-foot"><button class="secondary-button" type="button" data-action="reset-settings">${escapeHtml(t("settingsReset"))}</button><button class="action-button" type="button" data-action="save-settings"${disabled ? " disabled" : ""}>${escapeHtml(state.settingsSaving ? t("settingsSaving") : t("settingsSave"))}</button></footer>`;
@@ -3650,8 +3848,8 @@ async function saveThemeSettings() {
     showToast(t("themeSettings"), t("settingsSignInHint"), "warning");
     return;
   }
-  if (state.turnstileBlocked) {
-    showToast(t("themeSettings"), t("settingsTurnstileHint"), "warning");
+  if (isTurnstileVerifying()) {
+    showToast(t("themeSettings"), t("turnstileVerifyingHint"), "warning");
     return;
   }
   state.settingsSaving = true;
@@ -4174,6 +4372,8 @@ function handleClick(event) {
     renderApp();
   } else if (action === "refresh") {
     refreshStatuses({ manual: true });
+  } else if (action === "turnstile-retry") {
+    void retryTurnstile();
   } else if (action === "retry") {
     initialize();
   }
@@ -4379,12 +4579,12 @@ function handleDrawerPointerCancel(event) {
 }
 
 // `GET /api/config` → 站点信息 + 主题设置（theme_options 里的 butterfly_* 键）。
-async function loadSiteConfig() {
-  const config = await api.getConfig();
+async function loadSiteConfig(preloaded = null) {
+  // 启动拿到的配置**直接交给应用**（启动门控已请求过 /api/config，不得再读一次，否则请求次数失真）。
+  const config = isRecord(preloaded) ? preloaded : await api.getConfig();
   if (!isRecord(config)) throw new Error(t("loadFailedTitle"));
   state.cfsmConfig = config;
   state.themeOptions = isRecord(config.theme_options) ? config.theme_options : {};
-  state.turnstileBlocked = isTurnstileBlocking(config);
   state.publicInfo = {
     sitename: typeof config.site_title === "string" ? config.site_title : "",
     description: "",
@@ -4518,7 +4718,23 @@ async function initialize() {
       loadDemoData();
       state.dataScope = DATA_SCOPE.list;
     } else {
-      await loadSiteConfig();
+      // 启动门控：Turnstile 挑战必须先于应用挂载（先拿凭证，再进应用）。旧闸门删除后这是唯一入口——
+      // 不在这里拦，首个业务请求（/api/servers）就会以裸凭证撞 403、落进通用错误页。
+      // 挑战期间的界面由 handleTurnstileState → syncTurnstileGate 渲染，这里只负责等待与放行。
+      const gate = await turnstile.bootstrap();
+      if (turnstileGateVisible()) {
+        // 挑战失败/超时：停在挑战页；启动未完成，人工重试要重跑**整个启动**而不是只重跑挑战。
+        turnstileUi.started = false;
+        state.loading = false;
+        renderTurnstileGate();
+        return;
+      }
+      turnstileUi.started = true;
+      // 启动拿到的配置直接交给应用（loadSiteConfig 不得再读一次 /api/config，否则请求次数失真）；
+      // 形状非法时走同一失败路径，**绝不**静默回退成「再读一次」。
+      const preloaded = isRecord(gate?.config) ? gate.config : null;
+      if (!preloaded) throw new Error(t("loadFailedTitle"));
+      await loadSiteConfig(preloaded);
       // CFSM 没有 `/api/me`：本地有 jwt_token 即视为已登录（可看隐藏机器、可查 >24h 历史）。
       state.userInfo = { logged_in: hasStoredToken(), username: "" };
       // 深链冷启动 `#/server/<id>`：单机 REST + 单服订阅，**不调用** `/api/servers`

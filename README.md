@@ -66,10 +66,14 @@ copy, labels in zh-CN, en, ja).
   panel reads `/api/config` immediately before writing and only merges its own `butterfly_*` keys.
   Keys that belong to other themes (for example LuminaPlus) are preserved.
 * Not signed in → the panel is read-only; sign in at `/admin#admin` first.
-* Global Turnstile enabled → **the whole theme is unusable**, not just a read-only panel: CFSM requires
-  `X-Turnstile-Token` on every `/api/*` request (only `/api/config` without that header, `/api/ws` and
-  `/admin/api` bypass it), and this port does not implement that credential chain. It is an explicit
-  non-goal; a site with only login-flow Turnstile is unaffected.
+* Global Turnstile enabled → **the theme handles it**. On boot it reads `/api/config` (exempt only while
+  *both* Turnstile headers are absent), renders the Cloudflare widget with the returned `turnstile_site_key`,
+  and exchanges the one-time token for a `turnstile_verified` credential. The unified request layer then
+  attaches `X-Turnstile-Verified` to every `/api/*` call; `/api/ws` and `/admin/api` stay exempt, and a site
+  with only login-flow Turnstile needs no challenge at all.
+  When the credential expires, the theme runs **one recovery episode** (at most two automatic
+  challenge/exchange attempts, at most one replay per request) and only recovers on a data-bearing success.
+  If recovery fails it shows a retryable screen — never a blank page, and it never reloads the page itself.
 * Changes apply locally while you edit; nothing is written until you press *Save settings*.
 
 ## Development

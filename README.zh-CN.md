@@ -52,9 +52,12 @@ CF-Server-Monitor 对主题静态资源下发 `Cache-Control: public, max-age=31
   该接口**整对象替换**且**始终要求 `Authorization: Bearer <jwt>`**，所以面板在写之前会立即重读 `/api/config`，
   只合并自己的 `butterfly_*` 键；属于其它主题（例如 LuminaPlus）的键会被完整保留。
 - 未登录 → 面板只读，请先到 `/admin#admin` 登录。
-- 站点开启全局 Turnstile → **整套主题不可用**，不只是面板只读：CFSM 要求所有 `/api/*` 请求携带
-  `X-Turnstile-Token`（仅 `/api/config` 不带该头时、`/api/ws`、`/admin/api` 例外），而本移植版不实现该凭证链。
-  这是明确的非目标；仅在登录流程启用 Turnstile 的站点不受影响。
+- 站点开启全局 Turnstile → **主题会自己完成验证**：启动时先取 `/api/config`（仅当两个 Turnstile 头**都不带**时才豁免），
+  用返回的 `turnstile_site_key` 渲染 Cloudflare 组件，把一次性 token 换成 `turnstile_verified` 凭证；
+  之后由统一请求层给所有 `/api/*` 带上 `X-Turnstile-Verified`。`/api/ws` 与 `/admin/api` 仍豁免，
+  只在登录流程启用 Turnstile 的站点**无需验证**。
+  凭证过期会走**一次恢复过程**（最多自动尝试 2 次、每个请求最多重放 1 次），且只有拿到数据性成功响应才算恢复；
+  仍失败则显示可重试界面——**不会白屏，也不会自动整页刷新**。
 - 编辑只改本地草稿，点「保存设置」才写站。
 
 ## 开发
