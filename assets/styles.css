@@ -1986,6 +1986,10 @@ svg {
 
 .node-meters {
   display: grid;
+  /* 跨满两列：`.node-main` 给「波形图」留了 41% 的第二列，但移植版不渲染波形图
+     （app.js 里没有任何 .node-sparkline）→ 不跨列的话 CPU/内存/磁盘 三条只能占 59%，
+     右侧空一大块，且与同卡片的「剩余流量」条（满宽）不一致。 */
+  grid-column: 1 / -1;
   align-content: center;
   gap: 7px;
 }
