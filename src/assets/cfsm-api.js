@@ -55,12 +55,15 @@ function deleteHeader(headers, name) {
 }
 
 export class CfsmApiError extends Error {
-  constructor(message, { status = 0, path = "", cause = null } = {}) {
+  constructor(message, { status = 0, path = "", cause = null, turnstile = false, reason = "" } = {}) {
     super(message);
     this.name = "CfsmApiError";
     this.status = status;
     this.path = path;
     this.cause = cause;
+    // 保留结构化分类：业务层要能直接区分「Turnstile 失败」与普通 403，而不必靠 status + 链快照反推。
+    this.turnstile = turnstile === true;
+    this.reason = String(reason || "");
   }
 }
 

@@ -88,6 +88,9 @@ export function createTurnstileStorage(backing = null) {
   };
   return {
     get(key) {
+      // 内存优先：写成功一定先落内存，而 backing 可能「可读不可写」（隐私模式 / 只读沙箱），
+      // 只读 backing 会看不到刚写入的凭证 → 每个业务请求都被当成无凭证 → 反复触发恢复直到锁定。
+      if (memory.has(key)) return memory.get(key);
       const target = resolve();
       if (target) {
         try {
@@ -96,19 +99,18 @@ export function createTurnstileStorage(backing = null) {
           // 读失败 → 退回内存
         }
       }
-      return memory.get(key) || "";
+      return "";
     },
     set(key, value) {
+      memory.set(key, value);
       const target = resolve();
       if (target) {
         try {
           target.setItem(key, value);
-          return;
         } catch {
-          // 写失败（配额/禁用）→ 退回内存
+          // 写失败（配额/禁用）→ 内存已兜住，读取路径不受影响
         }
       }
-      memory.set(key, value);
     },
     remove(key) {
       const target = resolve();
@@ -553,7 +555,20 @@ export function createTurnstileChain({
     isLocked: () => locked,
     isRecovering: () => Boolean(recoverPromise),
     // 探测/交换外的受保护请求在恢复期间等待同一个恢复 Promise，避免并发重复挑战
-    waitForRecovery: () => (recoverPromise ? recoverPromise : Promise.resolve({ ok: true, reason: "" })),
+    // 在途恢复的**有界**等待：恢复本身仍会跑完并按自己的阶段超时结算，这里只保证调用方不会无限期
+    // 挂住——门控等待挂住会让 refreshStatuses 的 in-flight 标志一直为真，轮询与手动刷新被静默跳过。
+    waitForRecovery: (timeout = limits.exchange) => {
+      if (!recoverPromise) return Promise.resolve({ ok: true, reason: "" });
+      if (!(timeout > 0)) return recoverPromise;
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve({ ok: false, reason: "recovery-timeout" }), timeout);
+        const settle = (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        };
+        recoverPromise.then(settle, () => settle({ ok: false, reason: "recovery-failed" }));
+      });
+    },
     setConfig(next) {
       config = next;
     },

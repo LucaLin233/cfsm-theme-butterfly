@@ -614,6 +614,8 @@ await checkAsync("5b 并发 403（同一批到达）→ 挑战次数仍为 1", a
   // 失败是缺陷（凭证过期时表现为若干面板同时报错）。
   assert.equal(results.filter(r => r.status === "fulfilled").length, 3, "同一批 403 的三个请求都应恢复成功");
   const verdicts = site.pathRequests("/api/servers").map(r => r.verdict);
+  // 三个请求各重放一次并各自成功（不是只有发起者成功、其余失败）
+  assert.equal(verdicts.filter(v => v === "verified").length, 3, "三个请求各重放一次并各自成功");
   observations.push(
     `[观察] 5b 同批 403：三个请求结局 = ${results.map(r => (r.status === "fulfilled" ? "fulfilled" : "rejected(人机验证失败)")).join(", ")}`
     + `；chain.recover() 被调用 ${recoverCalls} 次；挑战 1 次；/api/servers 落库请求 = ${JSON.stringify(verdicts)}`
@@ -635,9 +637,9 @@ await checkAsync("6a 带刚换发的新凭证仍 403 → 终止并锁定，不�
       assert.ok(error instanceof CfsmApiError);
       assert.equal(error.status, 403);
       assert.equal(error.message, "人机验证失败");
-      // 已知差距：CfsmApiError 构造器只保留 status/path/cause，调用点传入的 turnstile/reason 被丢弃
-      assert.equal(error.turnstile, undefined);
-      assert.equal(error.reason, undefined);
+      // 结构化分类已保留（此前构造器丢弃 turnstile/reason，业务层无法区分「Turnstile 失败」与普通 403）
+      assert.equal(error.turnstile, true);
+      assert.equal(error.reason, "replayed-forbidden");
       return true;
     },
   );
@@ -687,7 +689,7 @@ await checkAsync("7 普通权限 403（文案不同）→ 零挑战、零清凭�
       assert.ok(error instanceof CfsmApiError);
       assert.equal(error.status, 403);
       assert.equal(error.message, "forbiddenByPolicy");
-      assert.equal(error.turnstile, undefined, "非 Turnstile 403 不得标记为凭证问题");
+      assert.equal(error.turnstile, false, "非 Turnstile 403 不得标记为凭证问题");
       return true;
     },
   );
@@ -830,6 +832,50 @@ await checkAsync("10 设置 POST 走统一请求层：带凭证执行 1 次，�
   assert.equal(barePosts[1].status, 200);
   assert.equal(barePosts[1].slot, bareSite.slots.get(bare.chain.getVerified()), "重放必须使用刚换发的凭证");
   assert.equal(bareSite.postExecutions - postsBefore, 1, "写入只允许发生一次（不得重复写入）");
+});
+
+// --- 11. 底层请求异常分支（此前零覆盖：桩的 json() 永不抛错、fetch 永不失败） ---
+
+await checkAsync("11a 响应不是合法 JSON → 抛错且不触发挑战", async () => {
+  const site = createFakeSite({ enabled: true });
+  const h = createHarness(site);
+  site.override = (req) => {
+    if (req.path === "/api/servers") {
+      return { status: 200, ok: true, json: async () => { throw new Error("bad json"); } };
+    }
+    return null;
+  };
+  let error = null;
+  try {
+    await h.api.getServers();
+  } catch (caught) {
+    error = caught;
+  }
+  assert.ok(error instanceof CfsmApiError, "应抛出 CfsmApiError");
+  assert.equal(error.status, 200);
+  assert.equal(error.turnstile, false);
+  assert.equal(error.reason, "");
+  assert.equal(h.calls.render, 0, "解析失败不是 Turnstile 错误，不得触发挑战");
+});
+
+await checkAsync("11b 网络层抛错 → status 0、零挑战、零凭证清理", async () => {
+  const site = createFakeSite({ enabled: true });
+  const h = createHarness(site, { seed: { [TURNSTILE_VERIFIED_KEY]: "cred-1" } });
+  site.override = (req) => {
+    if (req.path === "/api/servers") throw new Error("network down");
+    return null;
+  };
+  let error = null;
+  try {
+    await h.api.getServers();
+  } catch (caught) {
+    error = caught;
+  }
+  assert.ok(error instanceof CfsmApiError, "应抛出 CfsmApiError");
+  assert.equal(error.status, 0);
+  assert.equal(h.chain.isLocked(), false, "网络错误不得锁定");
+  assert.equal(h.chain.hasCredential(), true, "网络错误不得清凭证");
+  assert.equal(h.calls.render, 0, "网络错误不得触发挑战");
 });
 
 // --- 结果 ---

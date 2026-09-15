@@ -2483,6 +2483,8 @@ function radialRing(value) {
 }
 
 function renderLoading() {
+  // 应用层接管界面时复位门控标志：否则一次 onState 会把挑战页整壳盖回来（挑战进行中不会走到这里）。
+  turnstileUi.visible = false;
   app.innerHTML = `<main class="loading-screen" aria-busy="true"><section class="loading-card">
     <div class="loading-logo">${butterflyLogo()}</div>
     <h1>Komari Butterfly</h1>
@@ -2492,6 +2494,8 @@ function renderLoading() {
 }
 
 function renderFatalError() {
+  // 同上：错误页接管界面时复位门控标志，避免后续 onState 用挑战页把它盖掉（会连组件容器一起销毁）。
+  turnstileUi.visible = false;
   app.innerHTML = `<main class="loading-screen"><section class="loading-card" role="alert">
     <div class="loading-logo">${icon("warning", 34)}</div>
     <h1>${escapeHtml(t("loadFailedTitle"))}</h1>
