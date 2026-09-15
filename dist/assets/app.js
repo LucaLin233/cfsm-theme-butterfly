@@ -1,16 +1,16 @@
-import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.9.6";
-import { createCfsmApi, createPoller, hasStoredToken, readStoredToken } from "./cfsm-api.js?v=0.9.6";
-import { TURNSTILE_REASON, TURNSTILE_STATE, createTurnstileChain, createTurnstileRuntime } from "./cfsm-turnstile.js?v=0.9.6";
-import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportGroupStale, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=0.9.6";
-import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.9.6";
-import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=0.9.6";
+import { REGION_COORDS, REGION_NAMES } from "./region-data.js?v=0.9.7";
+import { createCfsmApi, createPoller, hasStoredToken, readStoredToken } from "./cfsm-api.js?v=0.9.7";
+import { TURNSTILE_REASON, TURNSTILE_STATE, createTurnstileChain, createTurnstileRuntime } from "./cfsm-turnstile.js?v=0.9.7";
+import { DEFAULT_SUBSCRIBE_SCOPE, buildWsUrl, createRealtimeChannel, extractSamples, isReportGroupStale, isReportStale, mergeStatusUpdate, normalizeIds } from "./cfsm-realtime.js?v=0.9.7";
+import { DEFAULT_SETTINGS, POLL_INTERVAL_MAX, POLL_INTERVAL_MIN, SECTION_LABELS, THEME_SETTINGS, localizedValue, mergeThemeSettings, normalizeSettingValue, readThemeSettings, settingLabel, settingsMeta } from "./theme-config.js?v=0.9.7";
+import { mapHistoryRows, mapNode, mapServers, mapStatus } from "./cfsm-map.js?v=0.9.7";
 
 const DEG_TO_RAD = Math.PI / 180;
 let worldLandVectorsPromise = null;
 
 function loadWorldLandVectors() {
   if (!worldLandVectorsPromise) {
-    worldLandVectorsPromise = import("./world-data.js?v=0.9.6")
+    worldLandVectorsPromise = import("./world-data.js?v=0.9.7")
       .then(({ WORLD_LAND_POINTS }) => Object.freeze(WORLD_LAND_POINTS.map(([longitude, latitude]) => {
         const lat = latitude * DEG_TO_RAD;
         const lng = longitude * DEG_TO_RAD;
@@ -25,7 +25,7 @@ function loadWorldLandVectors() {
   return worldLandVectorsPromise;
 }
 
-const THEME_VERSION = "0.9.6";
+const THEME_VERSION = "0.9.7";
 // 移植版仓库；上游原主题为 TomorrowX6/Komari-Butterfly（MIT，署名见 README）。
 const THEME_REPOSITORY = "https://github.com/LucaLin233/cfsm-theme-butterfly";
 const MOBILE_LAYOUT_QUERY = "(max-width: 720px), (max-width: 900px) and (orientation: landscape) and (max-height: 520px)";
@@ -1469,11 +1469,27 @@ function regionEmoji(code) {
   return [...code].map(character => String.fromCodePoint(127397 + character.charCodeAt(0))).join("");
 }
 
+// 旗帜闪烁根因有两层，都要治：
+// ① 整壳重渲染会新建 <img> 节点，而 `decoding="async"` 明确允许浏览器「先画空白、解码后再画」，
+//    `loading="lazy"` 还会再加一次调度 → 改为 eager + sync；
+// ② 新建节点仍要重新取位图，解码结果若已被缓存淘汰就再闪一次 → 预热并**持有引用**（引用在，
+//    解码位图不会被回收），同一个码只做一次。
+const flagImageCache = new Map();
+function prewarmFlag(code) {
+  if (flagImageCache.has(code)) return;
+  const img = new Image();
+  img.decoding = "sync";
+  img.src = `/flags/${code}.svg`;
+  flagImageCache.set(code, img);
+}
+
 function regionFlag(region) {
   const code = regionCode(region);
   if (!code) return icon("globe", 14);
+  const key = code.toLowerCase();
   // 旗帜改由 CFSM 同源提供（小写两位码）；主题不再打包 272 个 SVG。
-  return `<img class="country-flag" src="/flags/${code.toLowerCase()}.svg" alt="" loading="lazy" decoding="async"/>`;
+  prewarmFlag(key);
+  return `<img class="country-flag" src="/flags/${key}.svg" alt="" loading="eager" decoding="sync"/>`;
 }
 
 // 未知/未配置的地区码会让 /flags/<code>.svg 返回 200 text/html（不是图片），
@@ -3148,7 +3164,10 @@ function patchLiveValues() {
 // 签名不变 → 打补丁；签名变化或距上次整页渲染超过兜底间隔 → 整页重建
 function schedulePatchOrRender() {
   if (document.hidden) return;
-  if (matchMedia(MOBILE_LAYOUT_QUERY).matches || state.globeOpen || state.drawerUuid
+  // 移动布局同样走补丁路径：卡片 DOM 与桌面一致（差异只在 CSS），而整壳重渲染在手机上是每秒数次
+  // 的新节点 + 旗帜等图片重新解码 —— 这正是「旗帜闪烁」的主因（桌面早已走补丁，所以只在手机上可见）。
+  // 其余弹层/抽屉状态本身需要结构提交，仍退回整页渲染。
+  if (state.globeOpen || state.drawerUuid
     || state.mobileSearchOpen || state.sidebarOpen || state.notificationsOpen) {
     scheduleStatusRender(false);
     return;
