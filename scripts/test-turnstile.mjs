@@ -17,6 +17,7 @@ import {
   TURNSTILE_TOKEN_KEY,
   TURNSTILE_VERIFIED_KEY,
   createTurnstileChain,
+  createTurnstileStorage,
 } from "../src/assets/cfsm-turnstile.js";
 import {
   AUTH_TOKEN_KEY,
@@ -853,6 +854,7 @@ await checkAsync("11a 响应不是合法 JSON → 抛错且不触发挑战", asy
   }
   assert.ok(error instanceof CfsmApiError, "应抛出 CfsmApiError");
   assert.equal(error.status, 200);
+  assert.equal(error.message, "响应不是合法 JSON");
   assert.equal(error.turnstile, false);
   assert.equal(error.reason, "");
   assert.equal(h.calls.render, 0, "解析失败不是 Turnstile 错误，不得触发挑战");
@@ -873,9 +875,73 @@ await checkAsync("11b 网络层抛错 → status 0、零挑战、零凭证清理
   }
   assert.ok(error instanceof CfsmApiError, "应抛出 CfsmApiError");
   assert.equal(error.status, 0);
+  assert.equal(error.turnstile, false, "网络错误不得标记为凭证问题");
+  assert.equal(error.reason, "");
   assert.equal(h.chain.isLocked(), false, "网络错误不得锁定");
-  assert.equal(h.chain.hasCredential(), true, "网络错误不得清凭证");
+  assert.equal(h.chain.getVerified(), "cred-1", "网络错误不得改动凭证值");
   assert.equal(h.calls.render, 0, "网络错误不得触发挑战");
+});
+
+// --- 12. 生产存储实现（真 localStorage 语义）---
+// 此前只测了 harness 自己注入的另一套存储，生产实现 `createTurnstileStorage` 的读写语义零覆盖，
+// 内存优先那次改动正是从这里溜过去的（读路径遮蔽外部更新/删除）。
+
+function createMemoryBacking({ writable = true } = {}) {
+  const map = new Map();
+  let canWrite = writable;
+  return {
+    getItem(key) {
+      return map.has(key) ? map.get(key) : null;
+    },
+    setItem(key, value) {
+      if (!canWrite) throw new Error("QuotaExceededError");
+      map.set(key, String(value));
+    },
+    removeItem(key) {
+      map.delete(key);
+    },
+    // 模拟「稍后恢复可写」或「外部写入者不受本实例配额限制」
+    setWritable(value) {
+      canWrite = value;
+    },
+  };
+}
+
+await checkAsync("12a 外部上下文的更新/清除必须可见（读路径不得被内存副本遮蔽）", async () => {
+  const backing = createMemoryBacking();
+  const storage = createTurnstileStorage(backing);
+  storage.set(TURNSTILE_VERIFIED_KEY, "mine");
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "mine");
+  // 站点内置前端 / 其它标签页换发新凭证 → 主题必须看到（否则一直用旧值发请求）
+  backing.setItem(TURNSTILE_VERIFIED_KEY, "external-new");
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "external-new", "外部新凭证必须可见");
+  // 外部清除 → 必须跟着变空，不能回落到陈旧内存值
+  backing.removeItem(TURNSTILE_VERIFIED_KEY);
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "外部清除后不得回落到陈旧内存值");
+});
+
+await checkAsync("12b 可读不可写（隐私模式/配额）→ 内存兜底可读写，外部写入仍优先", async () => {
+  const backing = createMemoryBacking({ writable: false });
+  const storage = createTurnstileStorage(backing);
+  storage.set(TURNSTILE_TOKEN_KEY, "token-1");
+  assert.equal(storage.get(TURNSTILE_TOKEN_KEY), "token-1", "写失败也要能立刻读到");
+  storage.set(TURNSTILE_VERIFIED_KEY, "cred-fallback");
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "cred-fallback");
+  // 兜底 key 上外部一旦写入真值，仍以 backing 为准
+  backing.setWritable(true);
+  backing.setItem(TURNSTILE_VERIFIED_KEY, "external-wins");
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "external-wins");
+  // 清除必须同时清掉兜底副本
+  storage.remove(TURNSTILE_VERIFIED_KEY);
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "清除后不得残留兜底值");
+});
+
+await checkAsync("12c 无 localStorage（backing 为空）→ 纯内存降级，读写与清除都成立", async () => {
+  const storage = createTurnstileStorage(null);
+  storage.set(TURNSTILE_VERIFIED_KEY, "mem-only");
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "mem-only");
+  storage.remove(TURNSTILE_VERIFIED_KEY);
+  assert.equal(storage.get(TURNSTILE_VERIFIED_KEY), "", "清除后不得残留");
 });
 
 // --- 结果 ---

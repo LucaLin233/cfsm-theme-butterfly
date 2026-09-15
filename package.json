@@ -2,7 +2,7 @@
   "name": "cfsm-theme-butterfly",
   "private": true,
   "type": "module",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Komari-Butterfly (WinUI 3 / Mica style) ported to CF-Server-Monitor as a self-hosted third-party theme.",
   "repository": {
     "type": "git",

@@ -73,7 +73,13 @@ export function isTurnstileCredential(value) {
 
 // localStorage 不可用（隐私模式 / 沙箱）时降级为内存凭证：只影响持久性，不影响可用性。
 export function createTurnstileStorage(backing = null) {
+  // 正常可读写时**一律以 backing 为准**：凭证与站点内置前端共享同一个 key，其它上下文（内置前端、
+  // 其它标签页）的更新与**删除**必须可见——若读路径被内存副本遮蔽，会一直用旧值发请求（多余 403、
+  // 反复挑战），甚至反过来删掉别人刚写的有效凭证。
+  // 只有「写 backing 失败」的 key 才用内存副本兜底：可读不可写（隐私模式 / 只读沙箱 / 配额）时不再
+  // 表现为「每个业务请求都无凭证 → 反复触发恢复直到锁定」。
   const memory = new Map();
+  const failed = new Set();
   const resolve = () => {
     if (backing) return backing;
     try {
@@ -88,31 +94,45 @@ export function createTurnstileStorage(backing = null) {
   };
   return {
     get(key) {
-      // 内存优先：写成功一定先落内存，而 backing 可能「可读不可写」（隐私模式 / 只读沙箱），
-      // 只读 backing 会看不到刚写入的凭证 → 每个业务请求都被当成无凭证 → 反复触发恢复直到锁定。
-      if (memory.has(key)) return memory.get(key);
       const target = resolve();
       if (target) {
         try {
-          return target.getItem(key) || "";
+          const value = target.getItem(key);
+          if (typeof value === "string" && value !== "") {
+            failed.delete(key);
+            memory.delete(key);
+            return value;
+          }
+          // backing 里没有值：只有「本实例写失败过」的 key 才回落到内存副本；
+          // 否则说明已被外部清除，必须跟着变空（不能拿陈旧内存值继续用）。
+          if (!failed.has(key)) {
+            memory.delete(key);
+            return "";
+          }
         } catch {
-          // 读失败 → 退回内存
+          // 读失败 → 用内存副本
         }
       }
-      return "";
+      return memory.get(key) || "";
     },
     set(key, value) {
-      memory.set(key, value);
       const target = resolve();
       if (target) {
         try {
           target.setItem(key, value);
+          failed.delete(key);
+          memory.delete(key);
+          return;
         } catch {
-          // 写失败（配额/禁用）→ 内存已兜住，读取路径不受影响
+          // 写失败（配额/禁用）→ 落到下面的内存副本
         }
       }
+      failed.add(key);
+      memory.set(key, value);
     },
     remove(key) {
+      failed.delete(key);
+      memory.delete(key);
       const target = resolve();
       if (target) {
         try {
@@ -121,7 +141,6 @@ export function createTurnstileStorage(backing = null) {
           // 忽略
         }
       }
-      memory.delete(key);
     },
   };
 }
@@ -555,9 +574,11 @@ export function createTurnstileChain({
     isLocked: () => locked,
     isRecovering: () => Boolean(recoverPromise),
     // 探测/交换外的受保护请求在恢复期间等待同一个恢复 Promise，避免并发重复挑战
-    // 在途恢复的**有界**等待：恢复本身仍会跑完并按自己的阶段超时结算，这里只保证调用方不会无限期
-    // 挂住——门控等待挂住会让 refreshStatuses 的 in-flight 标志一直为真，轮询与手动刷新被静默跳过。
-    waitForRecovery: (timeout = limits.exchange) => {
+    // 在途恢复的**有界**等待。预算覆盖完整恢复过程（用户挑战 + 交换）——用户在合法时间内解题不会被
+    // 判成终局失败（此前取 exchange 量级，20 秒就超时，会把历史/抽屉/详情的失败状态写进缓存与错误位，
+    // 挑战成功后仍显示不可用）；只有恢复真的不结算（异常卡死）才超时。
+    // 注意范围：这只约束「加入在途恢复的等待者」；发起恢复的那个请求仍直接 await recover()，不受此限。
+    waitForRecovery: (timeout = limits.user + limits.exchange) => {
       if (!recoverPromise) return Promise.resolve({ ok: true, reason: "" });
       if (!(timeout > 0)) return recoverPromise;
       return new Promise((resolve) => {
