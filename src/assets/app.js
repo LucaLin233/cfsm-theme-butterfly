@@ -51,7 +51,9 @@ const DATA_SCOPE = Object.freeze({ none: "none", list: "list", detail: "detail" 
 const PROBE_MIN_INTERVAL_MS = 30000;
 // 渲染闸门探针（DRAFT-v3 §A6 的调用计数断言）：detail 作用域下这些全局辅助必须 0 次调用。
 // 计数器常驻（每次 +1 的开销可忽略），仅在 `?debug=1` 时挂到 window 供浏览器验收读取。
-const renderCounters = { aggregateMetrics: 0, buildAlerts: 0, buildTrafficSeries: 0, filteredNodes: 0, renderCurrentView: 0 };
+const renderCounters = {
+  livePatches: 0,
+  liveSkips: 0, aggregateMetrics: 0, buildAlerts: 0, buildTrafficSeries: 0, filteredNodes: 0, renderCurrentView: 0 };
 
 // 批次 5.2 第一步（仅观测，不改变渲染行为）：结构签名。
 // 签名只包含会改变 DOM 节点身份/数量/顺序的量；固定模板的显隐与值不进签名（见 PLAN-5.0-v3 §3.1）。
@@ -76,6 +78,7 @@ function structureSignature() {
 }
 
 function observeStructureSignature() {
+  liveFullRenderAt = Date.now();
   let signature = null;
   try {
     signature = structureSignature();
@@ -963,7 +966,9 @@ function applyRealtimeBatch(message) {
 
 function handleRealtimeMessage(message) {
   if (message.type !== "batchUpdate") return;
-  if (applyRealtimeBatch(message) > 0) scheduleStatusRender(false);
+  if (applyRealtimeBatch(message) <= 0) return;
+  // 批次 5.2：稳态走数值补丁，结构变化才整页重建
+  schedulePatchOrRender();
 }
 
 function handleRealtimeState({ state: next, code, reason }) {
@@ -2638,10 +2643,10 @@ function renderStatusRibbon(metrics) {
   const samples = state.networkSamples.map(sample => sample.download);
   return `<section class="status-ribbon">
     <article class="metric-card" style="--metric-glow:var(--green-soft)"><div class="metric-card-title">${escapeHtml(t("liveStatus"))}</div><div class="metric-card-value" data-live-clock>${escapeHtml(time)}</div><div class="metric-card-foot"><span class="metric-dot"></span><span data-updated-label>${escapeHtml(updatedLabel())}</span></div></article>
-    <article class="metric-card"><div class="metric-card-inner-split"><div><div class="metric-card-title">${escapeHtml(t("onlineNodes"))}</div><div class="metric-card-value">${escapeHtml(onlineLabel)}</div><div class="metric-card-foot">${escapeHtml(`${Math.round(metrics.onlineRate)}% ${t("online")}`)}</div></div>${radialRing(metrics.onlineRate)}</div></article>
-    <article class="metric-card" style="--metric-glow:rgba(83,100,244,.10)"><div class="metric-card-title">${escapeHtml(t("regionsMetric"))}</div><div class="metric-card-value">${metrics.regions}</div><div class="metric-card-foot">${icon("globe", 13)} ${escapeHtml(t("globalCoverage"))}</div></article>
-    <article class="metric-card" style="--metric-glow:var(--green-soft)"><div class="metric-card-title">${escapeHtml(t("totalTraffic"))}</div><div class="metric-dual"><div class="metric-dual-row"><span class="direction">↑</span>${escapeHtml(formatBytes(metrics.totalUpload))}</div><div class="metric-dual-row"><span class="direction">↓</span>${escapeHtml(formatBytes(metrics.totalDownload))}</div></div></article>
-    <article class="metric-card" style="--metric-glow:rgba(56,191,193,.12)"><div class="metric-card-title">${escapeHtml(t("networkSpeed"))}</div><div class="metric-dual"><div class="metric-dual-row"><span class="direction">↑</span>${escapeHtml(formatRate(metrics.uploadRate))}</div><div class="metric-dual-row"><span class="direction">↓</span>${escapeHtml(formatRate(metrics.downloadRate))}</div></div></article>
+    <article class="metric-card"><div class="metric-card-inner-split"><div><div class="metric-card-title">${escapeHtml(t("onlineNodes"))}</div><div class="metric-card-value" data-live="online-count">${escapeHtml(onlineLabel)}</div><div class="metric-card-foot" data-live="online-rate">${escapeHtml(`${Math.round(metrics.onlineRate)}% ${t("online")}`)}</div></div>${radialRing(metrics.onlineRate)}</div></article>
+    <article class="metric-card" style="--metric-glow:rgba(83,100,244,.10)"><div class="metric-card-title">${escapeHtml(t("regionsMetric"))}</div><div class="metric-card-value" data-live="regions">${metrics.regions}</div><div class="metric-card-foot">${icon("globe", 13)} ${escapeHtml(t("globalCoverage"))}</div></article>
+    <article class="metric-card" style="--metric-glow:var(--green-soft)"><div class="metric-card-title">${escapeHtml(t("totalTraffic"))}</div><div class="metric-dual"><div class="metric-dual-row"><span class="direction">↑</span><span data-live="traffic-up">${escapeHtml(formatBytes(metrics.totalUpload))}</span></div><div class="metric-dual-row"><span class="direction">↓</span><span data-live="traffic-down">${escapeHtml(formatBytes(metrics.totalDownload))}</span></div></div></article>
+    <article class="metric-card" style="--metric-glow:rgba(56,191,193,.12)"><div class="metric-card-title">${escapeHtml(t("networkSpeed"))}</div><div class="metric-dual"><div class="metric-dual-row"><span class="direction">↑</span><span data-live="speed-up">${escapeHtml(formatRate(metrics.uploadRate))}</span></div><div class="metric-dual-row"><span class="direction">↓</span><span data-live="speed-down">${escapeHtml(formatRate(metrics.downloadRate))}</span></div></div></article>
   </section>`;
 }
 
@@ -2820,6 +2825,129 @@ function freezeDynamicOrder(sorted) {
   return frozen.length === ids.length ? frozen : sorted;
 }
 
+// ---------- 批次 5.2：稳态数值补丁 ----------
+// 结构签名不变时只改数值，不做整页重建。纪律（PLAN-5.0-v3 §3.1 + v4/v5 增量）：
+//   ① 补丁路径**只改文本与属性**，禁止增删节点；一旦发现结构不符（缺子节点）立即退回整页重建；
+//   ② 卡片派生表达式必须与 renderNodeCard 完全一致（后续应提取为共享派生函数，消除两处漂移）；
+//   ③ 未纳入补丁集的字段（余量条、hero、延迟面板、告警面板）由 LIVE_RECONCILE_MS 兜底对账，
+//      最坏陈旧时间即该间隔，不会长期错误。
+const LIVE_RECONCILE_MS = 2000;
+let liveCards = new Map();
+let liveFields = new Map();
+let liveIndexedRender = -1;
+let liveFullRenderAt = 0;
+
+function legacyRenderForced() {
+  try { return new URLSearchParams(location.search).get("legacy") === "1"; } catch { return false; }
+}
+
+function ensureLiveIndex() {
+  if (liveIndexedRender === renderCounters.renderCurrentView && liveCards.size) return;
+  liveCards = new Map();
+  liveFields = new Map();
+  document.querySelectorAll("[data-live-card]").forEach((card) => liveCards.set(card.dataset.liveCard, card));
+  document.querySelectorAll("[data-live]").forEach((el) => liveFields.set(el.dataset.live, el));
+  liveIndexedRender = renderCounters.renderCurrentView;
+}
+
+function meterLive(value, color) {
+  const unavailable = value === null || value === undefined || !Number.isFinite(Number(value));
+  return {
+    shown: unavailable ? "—" : formatPercent(value),
+    style: unavailable ? null : `width:${clamp(value, 0, 100)}%;${color ? `--meter-color:${color}` : ""}`,
+  };
+}
+
+// 与 renderNodeCard 的派生一一对应；结构不符返回 false → 由调用方退回整页重建
+function patchNodeCardLive(card, node) {
+  const status = nodeStatus(node.uuid) || {};
+  const online = status.online === true;
+  const cpu = clamp(status.cpu, 0, 100);
+  const memory = percent(status.ram, status.ram_total || node.mem_total);
+  const disk = percent(status.disk, status.disk_total || node.disk_total);
+  const diskStale = statusReportStale(node.uuid, "disk");
+  const lineStale = statusReportStale(node.uuid, "line");
+  const bootStale = statusReportStale(node.uuid, "boot");
+  const latency = lineStale ? null : bestLatency(status);
+  const latencyInfo = latencyClass(latency);
+  const totalTraffic = finiteNumber(status.net_total_up) + finiteNumber(status.net_total_down);
+  const pill = card.querySelector(".latency-pill");
+  const rows = card.querySelectorAll(".meter-row");
+  const foot = card.querySelectorAll(".node-footer-item");
+  if (!pill || rows.length !== 3 || foot.length !== 3) return false;
+  if (card.classList.contains("is-offline") === online) card.classList.toggle("is-offline", !online);
+  const pillText = latency === null ? t("noLatency") : `${Math.round(latency)}ms`;
+  if (pill.textContent !== pillText) pill.textContent = pillText;
+  pill.style.setProperty("--latency-color", latencyInfo.color);
+  const meters = [
+    meterLive(cpu, undefined),
+    meterLive(memory, undefined),
+    meterLive(diskStale ? null : disk, disk > 82 ? "var(--red)" : undefined),
+  ];
+  for (let i = 0; i < 3; i += 1) {
+    const strong = rows[i].querySelector("strong");
+    const bar = rows[i].querySelector(".meter-value");
+    if (!strong) return false;
+    if (meters[i].style === null ? Boolean(bar) : !bar) return false;
+    if (strong.textContent !== meters[i].shown) strong.textContent = meters[i].shown;
+    if (bar && bar.getAttribute("style") !== meters[i].style) bar.setAttribute("style", meters[i].style);
+  }
+  const footText = [
+    `↑ ${formatRate(status.net_in)} · ↓ ${formatRate(status.net_out)}`,
+    formatBytes(totalTraffic),
+    bootStale ? "—" : formatDuration(status.uptime),
+  ];
+  for (let i = 0; i < 3; i += 1) if (foot[i].textContent !== footText[i]) foot[i].textContent = footText[i];
+  return true;
+}
+
+function patchLiveFields() {
+  if (!liveFields.size) return;
+  const metrics = aggregateMetrics();
+  const set = (key, text) => {
+    const el = liveFields.get(key);
+    if (el && el.textContent !== text) el.textContent = text;
+  };
+  set("online-count", `${metrics.online} / ${metrics.total}`);
+  set("online-rate", `${Math.round(metrics.onlineRate)}% ${t("online")}`);
+  set("regions", String(metrics.regions));
+  set("traffic-up", formatBytes(metrics.totalUpload));
+  set("traffic-down", formatBytes(metrics.totalDownload));
+  set("speed-up", formatRate(metrics.uploadRate));
+  set("speed-down", formatRate(metrics.downloadRate));
+}
+
+function patchLiveValues() {
+  if (state.dataScope === DATA_SCOPE.detail || document.hidden) return false;
+  ensureLiveIndex();
+  if (!liveCards.size) return false;
+  for (const node of state.nodes) {
+    const card = liveCards.get(node.uuid);
+    if (!card) continue;
+    if (!patchNodeCardLive(card, node)) return false;
+  }
+  patchLiveFields();
+  updateLiveElements();
+  renderCounters.livePatches += 1;
+  return true;
+}
+
+// 签名不变 → 打补丁；签名变化或距上次整页渲染超过兜底间隔 → 整页重建
+function schedulePatchOrRender() {
+  if (document.hidden) return;
+  if (matchMedia(MOBILE_LAYOUT_QUERY).matches || state.globeOpen || state.drawerUuid
+    || state.mobileSearchOpen || state.sidebarOpen || state.notificationsOpen) {
+    scheduleStatusRender(false);
+    return;
+  }
+  // 负对照（验收用）：?legacy=1 强制走旧路径（每批次整页重建），用于证明补丁层确实在起作用
+  if (legacyRenderForced()) { renderCounters.liveSkips += 1; scheduleStatusRender(false); return; }
+  const fresh = Date.now() - liveFullRenderAt < LIVE_RECONCILE_MS;
+  if (fresh && structureSignature() === lastStructureSignature && patchLiveValues()) return;
+  renderCounters.liveSkips += 1;
+  scheduleStatusRender(false);
+}
+
 function renderNodeGrid() {
   const nodes = filteredNodes();
   if (!nodes.length) {
@@ -2850,7 +2978,7 @@ function renderNodeCard(node, index) {
     ? [node.cfsm?.ipV4 === "1" ? `<span class="ip-tag">IPv4</span>` : "", node.cfsm?.ipV6 === "1" ? `<span class="ip-tag is-v6">IPv6</span>` : ""].join("")
     : "";
   const nodeName = String(node.name || node.uuid);
-  return `<article class="node-card${online ? "" : " is-offline"}" style="--node-accent:${color}">
+  return `<article class="node-card${online ? "" : " is-offline"}" data-live-card="${escapeHtml(node.uuid)}" style="--node-accent:${color}">
     <button class="node-card-open" type="button" data-node-uuid="${escapeHtml(node.uuid)}" aria-label="${escapeHtml(`${nodeName} · ${t("nodeDetails")}`)}"></button>
     <div class="node-card-top">
       <span class="node-flag">${regionFlag(node.region)}</span>
